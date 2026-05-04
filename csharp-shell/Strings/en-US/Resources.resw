@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="metadata">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="assembly">
+            <xsd:complexType>
+              <xsd:attribute name="alias" type="xsd:string" />
+              <xsd:attribute name="name" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- ================ Headers ================ -->
+  <data name="Header_Window.Text" xml:space="preserve">
+    <value>Window</value>
+  </data>
+  <data name="Header_CustomResize.Text" xml:space="preserve">
+    <value>Custom resize (DIP)</value>
+  </data>
+  <data name="Header_AutoCalibrate.Text" xml:space="preserve">
+    <value>Auto-calibrate</value>
+  </data>
+  <data name="Header_Status.Text" xml:space="preserve">
+    <value>Status</value>
+  </data>
+
+  <!-- ================ Buttons ================ -->
+  <data name="Button_Maximize.Content" xml:space="preserve">
+    <value>Maximize</value>
+  </data>
+  <data name="Button_Reset.Content" xml:space="preserve">
+    <value>Reset to default (1280x720)</value>
+  </data>
+  <data name="Button_Apply.Content" xml:space="preserve">
+    <value>Apply</value>
+  </data>
+  <data name="Button_ReadCurrent.Content" xml:space="preserve">
+    <value>Read current</value>
+  </data>
+  <data name="Button_Calibrate.Content" xml:space="preserve">
+    <value>Calibrate &amp; maximize</value>
+  </data>
+
+  <!-- ================ Labels ================ -->
+  <data name="Label_Width.Text" xml:space="preserve">
+    <value>W:</value>
+  </data>
+  <data name="Label_Height.Text" xml:space="preserve">
+    <value>H:</value>
+  </data>
+  <data name="AutoCalibrate_Description.Text" xml:space="preserve">
+    <value>Binary-search the largest size SDK accepts on this monitor, apply it, then center. Vertical centering is constrained by the Home Bar (SDK limitation).</value>
+  </data>
+
+  <!-- ================ Tooltips ================ -->
+  <data name="Tooltip_Settings" xml:space="preserve">
+    <value>Overlay Widget settings</value>
+  </data>
+  <data name="Tooltip_ReadCurrent" xml:space="preserve">
+    <value>Copy current widget size into the W/H boxes</value>
+  </data>
+
+  <!-- ================ Status (initial) ================ -->
+  <data name="Status_SizeInitial" xml:space="preserve">
+    <value>size: -</value>
+  </data>
+  <data name="Status_MaxInitial" xml:space="preserve">
+    <value>max: -</value>
+  </data>
+  <data name="Status_LastInitial" xml:space="preserve">
+    <value>last: -</value>
+  </data>
+  <data name="Status_RendererNotAttached" xml:space="preserve">
+    <value>renderer: not attached</value>
+  </data>
+  <data name="Status_RendererDllMissing" xml:space="preserve">
+    <value>renderer: dll not in package</value>
+  </data>
+
+  <!-- ================ Status (formatted) ================ -->
+  <data name="Status_RendererInitFailed" xml:space="preserve">
+    <value>renderer: init failed ({0})</value>
+    <comment>{0} = exception type name</comment>
+  </data>
+  <data name="Status_RendererCreateFailed" xml:space="preserve">
+    <value>renderer: create failed ({0})</value>
+    <comment>{0} = status code</comment>
+  </data>
+  <data name="Status_RendererAttached" xml:space="preserve">
+    <value>renderer: attached ({0}x{1} px)</value>
+    <comment>{0} = width px, {1} = height px</comment>
+  </data>
+  <data name="Status_SizeFormat" xml:space="preserve">
+    <value>size:  {0}x{1} DIP ({2}x{3} px @ {4}x)</value>
+    <comment>{0..3} = numbers, {4} = scale factor formatted</comment>
+  </data>
+  <data name="Status_MaxFormat" xml:space="preserve">
+    <value>max:   {0}x{1} DIP   min: {2}x{3} DIP
+screen: {4}x{5} px   target: {6}x{7} DIP</value>
+  </data>
+  <data name="Status_CalibratedFormat" xml:space="preserve">
+    <value>calibrated: {0}x{1} DIP (saved)</value>
+  </data>
+  <data name="Status_CalibratedNone" xml:space="preserve">
+    <value>calibrated: none (run "Calibrate &amp; maximize" once)</value>
+  </data>
+
+  <!-- ================ Last result ================ -->
+  <data name="Last_RequestResult" xml:space="preserve">
+    <value>last:  request {0}x{1} -> ok={2}</value>
+  </data>
+  <data name="Last_InvalidInput" xml:space="preserve">
+    <value>last:  invalid W/H input</value>
+  </data>
+  <data name="Last_WidgetNull" xml:space="preserve">
+    <value>last:  widget instance null</value>
+  </data>
+  <data name="Last_Threw" xml:space="preserve">
+    <value>last:  threw {0}</value>
+  </data>
+
+  <!-- ================ Calibrate ================ -->
+  <data name="Calibrate_WidgetNull" xml:space="preserve">
+    <value>widget instance null</value>
+  </data>
+  <data name="Calibrate_Phase1Header" xml:space="preserve">
+    <value>Phase 1: H=500, scanning W in [{0}, {1}] ...</value>
+  </data>
+  <data name="Calibrate_Phase1Probe" xml:space="preserve">
+    <value>Phase 1 (W): probe {0}x500 ok={1}, range=[{2},{3}], n={4}</value>
+  </data>
+  <data name="Calibrate_Phase2Header" xml:space="preserve">
+    <value>Phase 2: W={0}, scanning H in [{1}, {2}] ...</value>
+  </data>
+  <data name="Calibrate_Phase2Probe" xml:space="preserve">
+    <value>Phase 2 (H): probe {0}x{1} ok={2}, range=[{3},{4}], n={5}</value>
+  </data>
+  <data name="Calibrate_Done" xml:space="preserve">
+    <value>Done: {0}x{1} DIP applied (final ok={2}). Reserve: W={3}, H={4}. Probes: W={5}, H={6}.</value>
+  </data>
+  <data name="Calibrate_Error" xml:space="preserve">
+    <value>Error: {0}: {1}</value>
+  </data>
+
+  <!-- ================ V2 Perf 仪表盘 ================ -->
+  <!-- Monitors Rust GPU pump perf. V2 path readback is always 0 (full-GPU);
+       format string only shows render + total frames + peak, extra args passed to
+       string.Format are silently ignored. -->
+  <data name="Header_Perf.Text" xml:space="preserve">
+    <value>Renderer perf</value>
+  </data>
+  <data name="Perf_Initial" xml:space="preserve">
+    <value>Waiting for samples...</value>
+  </data>
+  <data name="Perf_Format" xml:space="preserve">
+    <value>GPU {0} ms | C# {7} ms (rb {8} / cp {9}) | win {3} | frames {4} | peak GPU {5} / tick {10} ms | V3</value>
+    <comment>Args: {0}=Rust render avg ms {1}=Rust readback avg ms(V2=0) {2}=Rust total avg ms {3}=valid window samples {4}=Rust total frames {5}=Rust GPU peak ms {6}=Rust readback peak ms {7}=C# tick avg ms {8}=C# readback avg ms {9}=C# copy avg ms {10}=C# tick peak ms</comment>
+  </data>
+  <data name="Perf_FormatNoData" xml:space="preserve">
+    <value>No frames yet (renderer attached but pump not started)</value>
+  </data>
+
+  <!-- ================ Copy diagnostics (Phase 1) ================ -->
+  <data name="Button_CopyDiagnostics.Content" xml:space="preserve">
+    <value>Copy diagnostics</value>
+  </data>
+  <data name="Tooltip_CopyDiagnostics" xml:space="preserve">
+    <value>Copy perf / status / calibration / renderer log to clipboard for pasting back as feedback</value>
+  </data>
+  <data name="Last_DiagnosticsCopied" xml:space="preserve">
+    <value>last:  diagnostics copied ({0} chars)</value>
+  </data>
+  <data name="Last_DiagnosticsCopyFailed" xml:space="preserve">
+    <value>last:  copy failed ({0})</value>
+  </data>
+</root>

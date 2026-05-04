@@ -1,0 +1,42 @@
+[package]
+name = "renderer"
+version = "0.1.0"
+edition = "2021"
+description = "Overlay engine renderer (cdylib) for Xbox Game Bar widget host"
+publish = false
+
+# 同时输出 cdylib（renderer.dll）和 rlib（让 cargo test 能链接到内部模块）。
+[lib]
+name = "renderer"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# R2 引入：D3D11 device + DXGI swap chain
+# R3 加：UI_Xaml_Controls (interface attribute) / ISwapChainPanelNative
+# R4 加：Win32_System_Com（CoInitializeEx for render thread）
+# V1 仍保留 Win32_System_Com 以兼容历史代码；offscreen 路径不直接用
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_System_Com",
+    # 阶段 3：D2D CreateSolidColorBrush 用到 D2D1_BRUSH_PROPERTIES{transform: Matrix3x2}
+    "Foundation_Numerics",
+] }
+windows-core = "0.59"
+thiserror = "2"
+# V1 加：Renderer 句柄外层用 Mutex 串行化跨线程访问（C# pump 线程 + UI 线程）
+parking_lot = "0.12"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

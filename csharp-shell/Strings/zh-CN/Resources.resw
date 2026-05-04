@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="metadata">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="assembly">
+            <xsd:complexType>
+              <xsd:attribute name="alias" type="xsd:string" />
+              <xsd:attribute name="name" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="resheader">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- ================ Headers ================ -->
+  <data name="Header_Window.Text" xml:space="preserve">
+    <value>窗口</value>
+  </data>
+  <data name="Header_CustomResize.Text" xml:space="preserve">
+    <value>自定义尺寸 (DIP)</value>
+  </data>
+  <data name="Header_AutoCalibrate.Text" xml:space="preserve">
+    <value>自动校准</value>
+  </data>
+  <data name="Header_Status.Text" xml:space="preserve">
+    <value>状态</value>
+  </data>
+
+  <!-- ================ Buttons ================ -->
+  <data name="Button_Maximize.Content" xml:space="preserve">
+    <value>最大化</value>
+  </data>
+  <data name="Button_Reset.Content" xml:space="preserve">
+    <value>恢复默认 (1280x720)</value>
+  </data>
+  <data name="Button_Apply.Content" xml:space="preserve">
+    <value>应用</value>
+  </data>
+  <data name="Button_ReadCurrent.Content" xml:space="preserve">
+    <value>读取当前值</value>
+  </data>
+  <data name="Button_Calibrate.Content" xml:space="preserve">
+    <value>校准并最大化</value>
+  </data>
+
+  <!-- ================ Labels ================ -->
+  <data name="Label_Width.Text" xml:space="preserve">
+    <value>宽:</value>
+  </data>
+  <data name="Label_Height.Text" xml:space="preserve">
+    <value>高:</value>
+  </data>
+  <data name="AutoCalibrate_Description.Text" xml:space="preserve">
+    <value>二分搜索 SDK 在当前显示器上接受的最大尺寸，应用并居中。由于 Game Bar 顶部 Home Bar 占用空间，垂直居中受 SDK 限制。</value>
+  </data>
+
+  <!-- ================ Tooltips ================ -->
+  <data name="Tooltip_Settings" xml:space="preserve">
+    <value>覆盖层组件设置</value>
+  </data>
+  <data name="Tooltip_ReadCurrent" xml:space="preserve">
+    <value>把当前组件尺寸填入宽/高输入框</value>
+  </data>
+
+  <!-- ================ Status (initial) ================ -->
+  <data name="Status_SizeInitial" xml:space="preserve">
+    <value>尺寸: -</value>
+  </data>
+  <data name="Status_MaxInitial" xml:space="preserve">
+    <value>上限: -</value>
+  </data>
+  <data name="Status_LastInitial" xml:space="preserve">
+    <value>上次: -</value>
+  </data>
+  <data name="Status_RendererNotAttached" xml:space="preserve">
+    <value>渲染器: 未连接</value>
+  </data>
+  <data name="Status_RendererDllMissing" xml:space="preserve">
+    <value>渲染器: dll 不在包内</value>
+  </data>
+
+  <!-- ================ Status (formatted) ================ -->
+  <data name="Status_RendererInitFailed" xml:space="preserve">
+    <value>渲染器: 初始化失败 ({0})</value>
+  </data>
+  <data name="Status_RendererCreateFailed" xml:space="preserve">
+    <value>渲染器: 创建失败 ({0})</value>
+  </data>
+  <data name="Status_RendererAttached" xml:space="preserve">
+    <value>渲染器: 已连接 ({0}x{1} px)</value>
+  </data>
+  <data name="Status_SizeFormat" xml:space="preserve">
+    <value>尺寸:  {0}x{1} DIP ({2}x{3} px @ {4}x)</value>
+  </data>
+  <data name="Status_MaxFormat" xml:space="preserve">
+    <value>上限:   {0}x{1} DIP   下限: {2}x{3} DIP
+屏幕: {4}x{5} px   目标: {6}x{7} DIP</value>
+  </data>
+  <data name="Status_CalibratedFormat" xml:space="preserve">
+    <value>已校准: {0}x{1} DIP (已保存)</value>
+  </data>
+  <data name="Status_CalibratedNone" xml:space="preserve">
+    <value>已校准: 无 (请先点一次 "校准并最大化")</value>
+  </data>
+
+  <!-- ================ Last result ================ -->
+  <data name="Last_RequestResult" xml:space="preserve">
+    <value>上次:  请求 {0}x{1} -> ok={2}</value>
+  </data>
+  <data name="Last_InvalidInput" xml:space="preserve">
+    <value>上次:  宽/高 输入无效</value>
+  </data>
+  <data name="Last_WidgetNull" xml:space="preserve">
+    <value>上次:  组件实例为空</value>
+  </data>
+  <data name="Last_Threw" xml:space="preserve">
+    <value>上次:  抛出 {0}</value>
+  </data>
+
+  <!-- ================ Calibrate ================ -->
+  <data name="Calibrate_WidgetNull" xml:space="preserve">
+    <value>组件实例为空</value>
+  </data>
+  <data name="Calibrate_Phase1Header" xml:space="preserve">
+    <value>阶段 1: H=500, 在 [{0}, {1}] 内扫描宽度...</value>
+  </data>
+  <data name="Calibrate_Phase1Probe" xml:space="preserve">
+    <value>阶段 1 (宽): 试探 {0}x500 ok={1}, 范围=[{2},{3}], n={4}</value>
+  </data>
+  <data name="Calibrate_Phase2Header" xml:space="preserve">
+    <value>阶段 2: W={0}, 在 [{1}, {2}] 内扫描高度...</value>
+  </data>
+  <data name="Calibrate_Phase2Probe" xml:space="preserve">
+    <value>阶段 2 (高): 试探 {0}x{1} ok={2}, 范围=[{3},{4}], n={5}</value>
+  </data>
+  <data name="Calibrate_Done" xml:space="preserve">
+    <value>完成: {0}x{1} DIP 已应用 (最终 ok={2}). 边距: W={3}, H={4}. 试探次数: W={5}, H={6}.</value>
+  </data>
+  <data name="Calibrate_Error" xml:space="preserve">
+    <value>错误: {0}: {1}</value>
+  </data>
+
+  <!-- ================ V2 Perf 仪表盘 ================ -->
+  <!-- 监测 Rust GPU pump 性能。V2 路径下 readback 永远 0（GPU 全程），
+       格式串只显示 render + 总帧 + peak，给 string.Format 多传的参数被忽略。
+       avg_render_us 接近 16000us（60fps 阈值）时颜色由代码动态切换。 -->
+  <data name="Header_Perf.Text" xml:space="preserve">
+    <value>渲染管线性能</value>
+  </data>
+  <data name="Perf_Initial" xml:space="preserve">
+    <value>等待采样中...</value>
+  </data>
+  <data name="Perf_Format" xml:space="preserve">
+    <value>GPU {0} ms | C# {7} ms (rb {8} / cp {9}) | 滑窗 {3} | 总帧 {4} | peak GPU {5} / tick {10} ms | V3</value>
+    <comment>Args: {0}=Rust 渲染均值ms {1}=Rust readback均值ms(V2=0) {2}=Rust 总均值ms {3}=滑窗有效样本数 {4}=Rust 总帧数 {5}=Rust GPU 峰值ms {6}=Rust readback 峰值ms {7}=C# tick 均值ms {8}=C# readback 均值ms {9}=C# copy 均值ms {10}=C# tick 峰值ms</comment>
+  </data>
+  <data name="Perf_FormatNoData" xml:space="preserve">
+    <value>尚无帧（渲染器已创建但 pump 未启动）</value>
+  </data>
+
+  <!-- ================ 复制诊断 (阶段1) ================ -->
+  <data name="Button_CopyDiagnostics.Content" xml:space="preserve">
+    <value>复制诊断信息</value>
+  </data>
+  <data name="Tooltip_CopyDiagnostics" xml:space="preserve">
+    <value>把性能 / 状态 / 校准 / 渲染器日志全部拷到剪贴板，方便粘贴反馈</value>
+  </data>
+  <data name="Last_DiagnosticsCopied" xml:space="preserve">
+    <value>上次:  诊断信息已复制 ({0} 字符)</value>
+  </data>
+  <data name="Last_DiagnosticsCopyFailed" xml:space="preserve">
+    <value>上次:  复制失败 ({0})</value>
+  </data>
+</root>
