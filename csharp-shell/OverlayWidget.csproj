@@ -108,9 +108,11 @@
 
   <!-- ============== Rust 渲染 DLL（C3 启用） ==============
        MSIX 包根会拷贝 renderer.dll，UWP 加载器查找规则会自动找到。
-       要求：先在 rust-renderer/ 下用 release profile 编译过。-->
+       要求：先在 workspace 根用 release profile 编过 renderer crate。
+       cargo workspace 输出在 workspace root 的 target/，不再是 rust-renderer/target/
+       （v0.6 单 crate 时是后者；自 v0.7 启用 workspace 后必须用前者）。 -->
   <ItemGroup>
-    <Content Include="..\rust-renderer\target\release\renderer.dll">
+    <Content Include="..\target\release\renderer.dll">
       <Link>renderer.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

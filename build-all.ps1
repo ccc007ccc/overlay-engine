@@ -56,7 +56,7 @@
 .NOTES
     - 与 csharp-shell\scripts\install-dev.ps1 配套：本脚本把"编译"那段补齐，
       install 复用既有的 cert / signtool / Add-AppxPackage 逻辑，DRY。
-    - csproj 里 <Content Include="..\rust-renderer\target\release\renderer.dll"> 写死了
+    - csproj 里 <Content Include="..\target\release\renderer.dll"> 写死了
       Rust release 输出路径——所以 -Configuration Debug 也用 release renderer.dll，符合预期
       （Rust 库不需要随 C# 切 Debug/Release）。
 #>
@@ -82,7 +82,9 @@ $RustDir       = Join-Path $ProjectRoot 'rust-renderer'
 $CsharpDir     = Join-Path $ProjectRoot 'csharp-shell'
 $Csproj        = Join-Path $CsharpDir 'OverlayWidget.csproj'
 $InstallScript = Join-Path $CsharpDir 'scripts\install-dev.ps1'
-$RendererDll   = Join-Path $RustDir   'target\release\renderer.dll'
+# v0.7 起 workspace 根 target/，cargo 不再写 rust-renderer/target/。
+# csproj 里 <Content Include="..\target\release\renderer.dll"> 也是这个路径。
+$RendererDll   = Join-Path $ProjectRoot 'target\release\renderer.dll'
 
 function Write-Step([int]$n, [int]$total, [string]$msg) {
     Write-Host ""
@@ -145,18 +147,18 @@ Write-Host "  Clean         : $Clean" -ForegroundColor DarkGray
 # ============================================================
 if (-not $SkipRust) {
     $step++
-    Write-Step $step $totalSteps "cargo build --release  (rust-renderer)"
+    Write-Step $step $totalSteps "cargo build -p renderer --release  (workspace)"
 
     $cargo = Resolve-Cargo
-    Push-Location $RustDir
+    Push-Location $ProjectRoot
     try {
         if ($Clean) {
-            Write-Host "  cargo clean" -ForegroundColor DarkGray
-            & $cargo clean
+            Write-Host "  cargo clean -p renderer" -ForegroundColor DarkGray
+            & $cargo clean -p renderer
             if ($LASTEXITCODE -ne 0) { throw "cargo clean failed: exit $LASTEXITCODE" }
         }
 
-        & $cargo build --release
+        & $cargo build -p renderer --release
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed: exit $LASTEXITCODE" }
     }
     finally {
@@ -179,7 +181,7 @@ if (-not $SkipCSharp) {
 
     if (-not (Test-Path $Csproj)) { throw "csproj not found: $Csproj" }
 
-    # csproj 里 <Content Include="..\rust-renderer\target\release\renderer.dll"> 是 release 路径写死。
+    # csproj 里 <Content Include="..\target\release\renderer.dll"> 是 release 路径写死。
     # 没编过 Rust 时这步会拷贝失败，给出友好提示。
     if (-not (Test-Path $RendererDll)) {
         throw "renderer.dll missing at $RendererDll. Run without -SkipRust first, or build rust-renderer manually."

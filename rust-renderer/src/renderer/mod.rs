@@ -131,6 +131,121 @@ impl RendererState {
         self.surface.cmd_draw_text(text, x, y, font_size, color)
     }
 
+    // ===== v0.7 矢量图元（薄转发） =====
+
+    pub(crate) fn cmd_draw_line(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        stroke_width: f32,
+        color: [f32; 4],
+        dash_style: i32,
+    ) -> RendererResult<()> {
+        self.surface
+            .cmd_draw_line(x0, y0, x1, y1, stroke_width, color, dash_style)
+    }
+
+    pub(crate) fn cmd_draw_polyline(
+        &mut self,
+        points: &[(f32, f32)],
+        stroke_width: f32,
+        color: [f32; 4],
+        closed: bool,
+    ) -> RendererResult<()> {
+        self.surface
+            .cmd_draw_polyline(points, stroke_width, color, closed)
+    }
+
+    pub(crate) fn cmd_stroke_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        stroke_width: f32,
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        self.surface.cmd_stroke_rect(x, y, w, h, stroke_width, color)
+    }
+
+    pub(crate) fn cmd_fill_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius_x: f32,
+        radius_y: f32,
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        self.surface
+            .cmd_fill_rounded_rect(x, y, w, h, radius_x, radius_y, color)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_stroke_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius_x: f32,
+        radius_y: f32,
+        stroke_width: f32,
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        self.surface
+            .cmd_stroke_rounded_rect(x, y, w, h, radius_x, radius_y, stroke_width, color)
+    }
+
+    pub(crate) fn cmd_fill_ellipse(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        self.surface.cmd_fill_ellipse(cx, cy, rx, ry, color)
+    }
+
+    pub(crate) fn cmd_stroke_ellipse(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        stroke_width: f32,
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        self.surface
+            .cmd_stroke_ellipse(cx, cy, rx, ry, stroke_width, color)
+    }
+
+    pub(crate) fn cmd_push_clip_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> RendererResult<()> {
+        self.surface.cmd_push_clip_rect(x, y, w, h)
+    }
+
+    pub(crate) fn cmd_pop_clip(&mut self) -> RendererResult<()> {
+        self.surface.cmd_pop_clip()
+    }
+
+    pub(crate) fn cmd_set_transform(&mut self, matrix: [f32; 6]) -> RendererResult<()> {
+        self.surface.cmd_set_transform(matrix)
+    }
+
+    pub(crate) fn cmd_reset_transform(&mut self) -> RendererResult<()> {
+        self.surface.cmd_reset_transform()
+    }
+
     /// v0.6 end_frame：内部 EndDraw + Present(0, 0)。不返 mapped pointer。
     pub(crate) fn end_frame(&mut self) -> RendererResult<PresentFrame> {
         let frame = self.surface.end_frame()?;

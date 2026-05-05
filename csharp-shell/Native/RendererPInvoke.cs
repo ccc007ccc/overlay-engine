@@ -188,6 +188,163 @@ namespace OverlayWidget.Native
         [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
         public static extern int renderer_end_frame(IntPtr handle);
 
+        // ============================================================
+        // v0.7 矢量图元（Phase 1）
+        // ============================================================
+        //
+        // 全部在 begin_frame / end_frame 之间调用，否则返 INVALID_PARAM。
+        // 颜色 premultiplied alpha [0, 1]，坐标 canvas-space pixel。
+        // 详见 docs/spec/painter-abi-v0.7.md 第 2.3 节。
+
+        /// <summary>v0.7 dash style 常量（与 painter.rs 同步）。</summary>
+        public static class DashStyle
+        {
+            public const int Solid = 0;
+            public const int Dash = 1;
+            public const int Dot = 2;
+            public const int DashDot = 3;
+        }
+
+        /// <summary>直线。dashStyle 用 <see cref="DashStyle"/> 常量；越界视为 Solid。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_draw_line(
+            IntPtr handle,
+            float x0, float y0,
+            float x1, float y1,
+            float strokeWidth,
+            float r, float g, float b, float a,
+            int dashStyle);
+
+        /// <summary>
+        /// 折线。points 是连续 [x0,y0,x1,y1,...] float 数组指针，pointCount = 点数（不是 float 数）。
+        /// closed != 0 时首尾自动相接。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_draw_polyline(
+            IntPtr handle,
+            IntPtr points,
+            int pointCount,
+            float strokeWidth,
+            float r, float g, float b, float a,
+            int closed);
+
+        /// <summary>矩形描边。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_stroke_rect(
+            IntPtr handle,
+            float x, float y, float w, float h,
+            float strokeWidth,
+            float r, float g, float b, float a);
+
+        /// <summary>圆角矩形填充。radiusX != radiusY 时是椭圆角。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_fill_rounded_rect(
+            IntPtr handle,
+            float x, float y, float w, float h,
+            float radiusX, float radiusY,
+            float r, float g, float b, float a);
+
+        /// <summary>圆角矩形描边。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_stroke_rounded_rect(
+            IntPtr handle,
+            float x, float y, float w, float h,
+            float radiusX, float radiusY,
+            float strokeWidth,
+            float r, float g, float b, float a);
+
+        /// <summary>椭圆填充（rx == ry 时是正圆）。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_fill_ellipse(
+            IntPtr handle,
+            float cx, float cy,
+            float rx, float ry,
+            float r, float g, float b, float a);
+
+        /// <summary>椭圆描边。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_stroke_ellipse(
+            IntPtr handle,
+            float cx, float cy,
+            float rx, float ry,
+            float strokeWidth,
+            float r, float g, float b, float a);
+
+        /// <summary>
+        /// 推矩形 clip 到栈，配对 <see cref="renderer_pop_clip"/>。
+        /// 当前实现走 D2D PushAxisAlignedClip ALIASED，clip 边缘整像素。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_push_clip_rect(
+            IntPtr handle,
+            float x, float y, float w, float h);
+
+        /// <summary>弹 clip 栈顶。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_pop_clip(IntPtr handle);
+
+        /// <summary>
+        /// 设置 2D 仿射变换。matrix 是 6 个 float 的指针：[m11, m12, m21, m22, dx, dy]。
+        /// set_transform 后命令叠加该变换；reset_transform 恢复成 viewport 平移（不是 identity）。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_set_transform(
+            IntPtr handle,
+            IntPtr matrix);
+
+        /// <summary>重置 transform 为 viewport 平移（v0.6 默认）。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_reset_transform(IntPtr handle);
+
+        // ============================================================
+        // 托管包装（避开每帧 P/Invoke marshal 数组的 alloc）
+        // ============================================================
+
+        /// <summary>
+        /// renderer_draw_polyline 的便利包装。注意：每次调用都会 fix 一份 array 指针，
+        /// 高频调用建议自己缓存 GCHandle，避免每帧 fix 开销。
+        /// 用 float[] 而非 ReadOnlySpan&lt;float&gt; —— UWP / .NET Native 的 BCL 没自带 Span。
+        /// </summary>
+        public static int DrawPolyline(
+            IntPtr handle,
+            float[] points,
+            float strokeWidth,
+            float r, float g, float b, float a,
+            bool closed)
+        {
+            if (points == null || points.Length == 0) return RENDERER_OK;
+            if (points.Length % 2 != 0)
+            {
+                // 协议错误：points 必须成对
+                return RENDERER_ERR_INVALID_PARAM;
+            }
+            int pointCount = points.Length / 2;
+            unsafe
+            {
+                fixed (float* p = points)
+                {
+                    return renderer_draw_polyline(
+                        handle, (IntPtr)p, pointCount,
+                        strokeWidth, r, g, b, a, closed ? 1 : 0);
+                }
+            }
+        }
+
+        /// <summary>
+        /// renderer_set_transform 的便利包装。matrix 必须 6 元素 [m11,m12,m21,m22,dx,dy]。
+        /// </summary>
+        public static int SetTransform(IntPtr handle, float[] matrix)
+        {
+            if (matrix == null || matrix.Length != 6) return RENDERER_ERR_INVALID_PARAM;
+            unsafe
+            {
+                fixed (float* p = matrix)
+                {
+                    return renderer_set_transform(handle, (IntPtr)p);
+                }
+            }
+        }
+
         /// <summary>
         /// 便利包装：托管 string → UTF-8 → 调 renderer_draw_text。
         /// 频繁调用建议自己缓存 byte[]，避免每帧 GetBytes alloc。

@@ -294,6 +294,316 @@ pub unsafe extern "system" fn renderer_end_frame(handle: *mut Renderer) -> Rende
 }
 
 // =====================================================================
+// v0.7 矢量图元 ABI（Phase 1）
+// =====================================================================
+//
+// 全部在 begin_frame / end_frame 之间调用，否则返 INVALID_PARAM。
+// 颜色 premultiplied alpha [0, 1]，坐标 canvas-space 像素。
+// 实现细节见 painter.rs（DrawCmd enum + execute 派发，决策 spec 10.5）。
+
+/// 直线。`stroke_width` 是 canvas-space 像素。
+/// `dash_style`: 0=solid, 1=dash, 2=dot, 3=dash_dot；越界视为 solid。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn renderer_draw_line(
+    handle: *mut Renderer,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+    dash_style: i32,
+) -> RendererStatus {
+    if handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    match renderer.cmd_draw_line(x0, y0, x1, y1, stroke_width, [r, g, b, a], dash_style) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_draw_line: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 折线 / 闭合多边形。`points` 是连续 `[x0,y0,x1,y1,...]` 数组，`point_count` = 点数（不是 float 数）。
+/// `closed != 0` 时首尾自动相接。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn renderer_draw_polyline(
+    handle: *mut Renderer,
+    points: *const f32,
+    point_count: i32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+    closed: i32,
+) -> RendererStatus {
+    if handle.is_null() || point_count < 0 {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    if point_count < 2 {
+        // 0 / 1 个点画不出线段，但不视为错误（业务方可能传空数组），no-op
+        return RENDERER_OK;
+    }
+    if points.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    let n = point_count as usize;
+    let raw = std::slice::from_raw_parts(points, n * 2);
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n);
+    for i in 0..n {
+        pts.push((raw[i * 2], raw[i * 2 + 1]));
+    }
+    match renderer.cmd_draw_polyline(&pts, stroke_width, [r, g, b, a], closed != 0) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_draw_polyline: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 矩形描边。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn renderer_stroke_rect(
+    handle: *mut Renderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) -> RendererStatus {
+    if handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    match renderer.cmd_stroke_rect(x, y, w, h, stroke_width, [r, g, b, a]) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_stroke_rect: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 圆角矩形填充。`radius_x` ≠ `radius_y` 时是椭圆角。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn renderer_fill_rounded_rect(
+    handle: *mut Renderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius_x: f32,
+    radius_y: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) -> RendererStatus {
+    if handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    match renderer.cmd_fill_rounded_rect(x, y, w, h, radius_x, radius_y, [r, g, b, a]) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_fill_rounded_rect: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 圆角矩形描边。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn renderer_stroke_rounded_rect(
+    handle: *mut Renderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius_x: f32,
+    radius_y: f32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) -> RendererStatus {
+    if handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    match renderer.cmd_stroke_rounded_rect(
+        x,
+        y,
+        w,
+        h,
+        radius_x,
+        radius_y,
+        stroke_width,
+        [r, g, b, a],
+    ) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_stroke_rounded_rect: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 椭圆填充（含正圆，rx == ry 时）。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn renderer_fill_ellipse(
+    handle: *mut Renderer,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) -> RendererStatus {
+    if handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    match renderer.cmd_fill_ellipse(cx, cy, rx, ry, [r, g, b, a]) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_fill_ellipse: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 椭圆描边。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn renderer_stroke_ellipse(
+    handle: *mut Renderer,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) -> RendererStatus {
+    if handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    match renderer.cmd_stroke_ellipse(cx, cy, rx, ry, stroke_width, [r, g, b, a]) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_stroke_ellipse: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 推矩形 clip。配对 `renderer_pop_clip` 使用，栈结构。
+/// 当前实现走 `PushAxisAlignedClip` (ALIASED)，clip 边缘走整像素。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_push_clip_rect(
+    handle: *mut Renderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> RendererStatus {
+    if handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    match renderer.cmd_push_clip_rect(x, y, w, h) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_push_clip_rect: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 弹 clip 栈顶。栈空时由 D2D 处理（通常是无操作或日志警告）。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_pop_clip(handle: *mut Renderer) -> RendererStatus {
+    if handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    match renderer.cmd_pop_clip() {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_pop_clip: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 设置 2D 仿射变换。`matrix` 是 6 个 float 的指针：`[m11, m12, m21, m22, dx, dy]`。
+/// 等同 D2D Matrix3x2。`set_transform` 后所有命令叠加该变换；`reset_transform` 恢复成
+/// viewport 平移（不是 identity —— begin_frame 内部已 SetTransform 了 viewport 平移）。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_set_transform(
+    handle: *mut Renderer,
+    matrix: *const f32,
+) -> RendererStatus {
+    if handle.is_null() || matrix.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let raw = std::slice::from_raw_parts(matrix, 6);
+    let m: [f32; 6] = [raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]];
+    let renderer = &*handle;
+    match renderer.cmd_set_transform(m) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_set_transform: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 重置 transform 为 viewport 平移（v0.6 默认状态）。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_reset_transform(
+    handle: *mut Renderer,
+) -> RendererStatus {
+    if handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    match renderer.cmd_reset_transform() {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_reset_transform: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+// =====================================================================
 // 诊断 ABI
 // =====================================================================
 
@@ -592,6 +902,219 @@ mod tests {
         assert_eq!(st, RENDERER_OK);
         unsafe { renderer_clear(h, 0.0, 0.0, 0.0, 0.0) };
         unsafe { renderer_fill_rect(h, 0.0, 0.0, 200.0, 200.0, 0.5, 0.5, 0.5, 0.8) };
+        let st = unsafe { renderer_end_frame(h) };
+        assert_eq!(st, RENDERER_OK);
+        unsafe { renderer_destroy(h) };
+    }
+
+    // ---------- v0.7 矢量图元 ABI ----------
+    //
+    // 这层是 ABI 状态机校验：调用顺序、null 句柄、状态码。
+    // 像素级 golden 比对延后到 Phase 2 加 readback API 后再做（v0.6 DComp 路径
+    // 没有 CPU readback，单测无法直接看像素 —— 这是已知限制，spec 第 6 节风险表）。
+
+    #[test]
+    fn cmd_v07_full_roundtrip_in_one_frame() {
+        // 一帧内连续调所有 11 个新命令 + 3 个老命令，全部应返 OK
+        let h = make_renderer(800, 600);
+        let st = unsafe { renderer_begin_frame(h, 0.0, 0.0, 800.0, 600.0) };
+        assert_eq!(st, RENDERER_OK);
+        unsafe { renderer_clear(h, 0.0, 0.0, 0.05, 1.0) };
+
+        // 矢量图元
+        let s = unsafe { renderer_draw_line(h, 10.0, 10.0, 100.0, 100.0, 2.0, 1.0, 0.5, 0.0, 1.0, 0) };
+        assert_eq!(s, RENDERER_OK);
+
+        let pts: [f32; 8] = [10.0, 200.0, 50.0, 240.0, 90.0, 200.0, 130.0, 260.0];
+        let s = unsafe {
+            renderer_draw_polyline(h, pts.as_ptr(), 4, 1.5, 0.2, 0.8, 0.4, 1.0, 0)
+        };
+        assert_eq!(s, RENDERER_OK);
+
+        let s = unsafe { renderer_stroke_rect(h, 200.0, 50.0, 100.0, 60.0, 1.0, 1.0, 1.0, 1.0, 1.0) };
+        assert_eq!(s, RENDERER_OK);
+
+        let s = unsafe {
+            renderer_fill_rounded_rect(h, 320.0, 50.0, 100.0, 60.0, 8.0, 8.0, 0.4, 0.4, 0.8, 0.9)
+        };
+        assert_eq!(s, RENDERER_OK);
+
+        let s = unsafe {
+            renderer_stroke_rounded_rect(
+                h, 440.0, 50.0, 100.0, 60.0, 12.0, 12.0, 2.0, 0.9, 0.9, 0.3, 1.0,
+            )
+        };
+        assert_eq!(s, RENDERER_OK);
+
+        let s = unsafe { renderer_fill_ellipse(h, 600.0, 80.0, 40.0, 30.0, 0.8, 0.2, 0.2, 0.9) };
+        assert_eq!(s, RENDERER_OK);
+
+        let s = unsafe {
+            renderer_stroke_ellipse(h, 700.0, 80.0, 40.0, 30.0, 1.5, 0.2, 0.8, 0.2, 1.0)
+        };
+        assert_eq!(s, RENDERER_OK);
+
+        // 状态命令：clip 栈
+        let s = unsafe { renderer_push_clip_rect(h, 50.0, 300.0, 400.0, 200.0) };
+        assert_eq!(s, RENDERER_OK);
+        unsafe { renderer_fill_rect(h, 0.0, 0.0, 800.0, 600.0, 0.0, 0.5, 0.5, 0.5) };
+        let s = unsafe { renderer_pop_clip(h) };
+        assert_eq!(s, RENDERER_OK);
+
+        // 状态命令：transform
+        let m: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 100.0, 100.0]; // pure translate
+        let s = unsafe { renderer_set_transform(h, m.as_ptr()) };
+        assert_eq!(s, RENDERER_OK);
+        unsafe { renderer_fill_rect(h, 0.0, 0.0, 50.0, 50.0, 1.0, 1.0, 0.0, 1.0) };
+        let s = unsafe { renderer_reset_transform(h) };
+        assert_eq!(s, RENDERER_OK);
+
+        let st = unsafe { renderer_end_frame(h) };
+        assert_eq!(st, RENDERER_OK);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn cmd_v07_outside_begin_returns_invalid_param() {
+        // 状态机：begin_frame 之外调任何 v0.7 命令都返 INVALID_PARAM
+        let h = make_renderer(640, 480);
+
+        let s = unsafe { renderer_draw_line(h, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0) };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        let s = unsafe { renderer_stroke_rect(h, 0.0, 0.0, 10.0, 10.0, 1.0, 1.0, 1.0, 1.0, 1.0) };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        let s = unsafe {
+            renderer_fill_rounded_rect(h, 0.0, 0.0, 10.0, 10.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0)
+        };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        let s = unsafe { renderer_fill_ellipse(h, 50.0, 50.0, 10.0, 10.0, 1.0, 1.0, 1.0, 1.0) };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        let s = unsafe { renderer_push_clip_rect(h, 0.0, 0.0, 10.0, 10.0) };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        let s = unsafe { renderer_pop_clip(h) };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        let m: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let s = unsafe { renderer_set_transform(h, m.as_ptr()) };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        let s = unsafe { renderer_reset_transform(h) };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn cmd_v07_null_handle_returns_invalid_param() {
+        // null 句柄是协议错误，所有 ABI 都应快速失败
+        let m: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+        let s = unsafe {
+            renderer_draw_line(
+                std::ptr::null_mut(),
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                0,
+            )
+        };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        let s = unsafe {
+            renderer_set_transform(std::ptr::null_mut(), m.as_ptr())
+        };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        let s = unsafe { renderer_pop_clip(std::ptr::null_mut()) };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+    }
+
+    #[test]
+    fn cmd_polyline_invalid_inputs() {
+        // null pointer + 负 count + 单点都要安全处理
+        let h = make_renderer(640, 480);
+        unsafe { renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0) };
+
+        // null 数组
+        let s = unsafe {
+            renderer_draw_polyline(h, std::ptr::null(), 3, 1.0, 1.0, 1.0, 1.0, 1.0, 0)
+        };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        // 负点数
+        let pts: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+        let s = unsafe {
+            renderer_draw_polyline(h, pts.as_ptr(), -1, 1.0, 1.0, 1.0, 1.0, 1.0, 0)
+        };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+
+        // 单点：no-op，但返 OK（业务方可能传空数组场景）
+        let s = unsafe {
+            renderer_draw_polyline(h, pts.as_ptr(), 1, 1.0, 1.0, 1.0, 1.0, 1.0, 0)
+        };
+        assert_eq!(s, RENDERER_OK);
+
+        // 0 点：no-op，OK
+        let s = unsafe {
+            renderer_draw_polyline(h, std::ptr::null(), 0, 1.0, 1.0, 1.0, 1.0, 1.0, 0)
+        };
+        assert_eq!(s, RENDERER_OK);
+
+        unsafe { renderer_end_frame(h) };
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn cmd_v07_clip_stack_push_pop_balance() {
+        // 嵌套 clip：push push fill pop pop —— 验证栈可工作
+        let h = make_renderer(800, 600);
+        unsafe { renderer_begin_frame(h, 0.0, 0.0, 800.0, 600.0) };
+
+        let s = unsafe { renderer_push_clip_rect(h, 50.0, 50.0, 400.0, 400.0) };
+        assert_eq!(s, RENDERER_OK);
+        let s = unsafe { renderer_push_clip_rect(h, 100.0, 100.0, 200.0, 200.0) };
+        assert_eq!(s, RENDERER_OK);
+
+        unsafe { renderer_fill_rect(h, 0.0, 0.0, 800.0, 600.0, 1.0, 0.0, 0.0, 1.0) };
+
+        let s = unsafe { renderer_pop_clip(h) };
+        assert_eq!(s, RENDERER_OK);
+        let s = unsafe { renderer_pop_clip(h) };
+        assert_eq!(s, RENDERER_OK);
+
+        let st = unsafe { renderer_end_frame(h) };
+        assert_eq!(st, RENDERER_OK);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn cmd_v07_transform_chained_operations() {
+        // set → fill → reset → fill：验证 transform 作用域正确，reset 后回到 viewport-translate
+        let h = make_renderer(800, 600);
+        unsafe { renderer_begin_frame(h, 100.0, 100.0, 600.0, 400.0) };
+
+        // 只平移 50,50
+        let m: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 50.0, 50.0];
+        let s = unsafe { renderer_set_transform(h, m.as_ptr()) };
+        assert_eq!(s, RENDERER_OK);
+        unsafe { renderer_fill_rect(h, 0.0, 0.0, 100.0, 100.0, 0.5, 0.5, 0.5, 1.0) };
+
+        // reset → 恢复 viewport translate
+        let s = unsafe { renderer_reset_transform(h) };
+        assert_eq!(s, RENDERER_OK);
+        unsafe { renderer_fill_rect(h, 200.0, 200.0, 50.0, 50.0, 1.0, 0.0, 0.0, 1.0) };
+
         let st = unsafe { renderer_end_frame(h) };
         assert_eq!(st, RENDERER_OK);
         unsafe { renderer_destroy(h) };

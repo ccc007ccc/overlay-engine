@@ -68,7 +68,7 @@ use windows::Win32::Graphics::Dxgi::{
 
 use crate::error::{RendererError, RendererResult};
 
-use super::painter::{D2DEngine, Painter};
+use super::painter::{D2DEngine, DrawCmd, Painter};
 
 /// v0.6 DComp swap chain backend。
 ///
@@ -98,6 +98,10 @@ pub(crate) struct PinnedReadbackBackend {
     /// 当前 swap chain back buffer 物理尺寸（widget 物理像素）
     vp_w: u32,
     vp_h: u32,
+    /// v0.7: 当前 viewport 原点（canvas-space），begin_frame 时记录。
+    /// reset_transform 命令需要恢复到 translate(-vp_x, -vp_y)，painter 通过它知道。
+    vp_x: f32,
+    vp_y: f32,
 
     /// `begin_frame` 后置 true，`end_frame` 消费后清回 false。防 cmd_* 在 begin 之外调；防双 begin。
     cmd_drawing: bool,
@@ -143,6 +147,8 @@ impl PinnedReadbackBackend {
             height,
             vp_w: width,
             vp_h: height,
+            vp_x: 0.0,
+            vp_y: 0.0,
             cmd_drawing: false,
             cmd_render_start: None,
         })
@@ -235,6 +241,9 @@ impl PinnedReadbackBackend {
         }
         self.cmd_drawing = true;
         self.cmd_render_start = Some(Instant::now());
+        // v0.7: 记录 viewport 原点供 painter::reset_transform 使用
+        self.vp_x = vp_x;
+        self.vp_y = vp_y;
         Ok(())
     }
 
@@ -286,6 +295,248 @@ impl PinnedReadbackBackend {
         }
         let mut painter = Painter::new(&self.d2d, (self.width, self.height));
         painter.draw_text(text, x, y, font_size, color);
+        Ok(())
+    }
+
+    // ============================================================
+    // v0.7 矢量图元 —— 11 个新命令，统一走 Painter::execute(DrawCmd)
+    // ============================================================
+    //
+    // 全部模板一致：状态校验 → 构造 painter（带 viewport_origin）→ execute(DrawCmd)。
+    // execute 内部用 enum + match 派发（决策 spec 10.5）。
+    //
+    // 这里没用宏，因为 cmd_* 各自参数表完全不同；宏的复杂度盖过节省的行数。
+
+    /// v0.7：构造一个带 viewport_origin 的 Painter。所有新命令通过它构造 painter。
+    fn make_painter(&self) -> Painter<'_> {
+        let mut p = Painter::new(&self.d2d, (self.width, self.height));
+        p.set_viewport_origin(self.vp_x, self.vp_y);
+        p
+    }
+
+    pub(crate) fn cmd_draw_line(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        stroke_width: f32,
+        color: [f32; 4],
+        dash_style: i32,
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_draw_line called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter().execute(&DrawCmd::DrawLine {
+            x0,
+            y0,
+            x1,
+            y1,
+            stroke_width,
+            rgba: color,
+            dash_style,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn cmd_draw_polyline(
+        &mut self,
+        points: &[(f32, f32)],
+        stroke_width: f32,
+        color: [f32; 4],
+        closed: bool,
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_draw_polyline called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter().execute(&DrawCmd::DrawPolyline {
+            points: points.to_vec(),
+            stroke_width,
+            rgba: color,
+            closed,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn cmd_stroke_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        stroke_width: f32,
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_stroke_rect called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter().execute(&DrawCmd::StrokeRect {
+            x,
+            y,
+            w,
+            h,
+            stroke_width,
+            rgba: color,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn cmd_fill_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius_x: f32,
+        radius_y: f32,
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_fill_rounded_rect called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter().execute(&DrawCmd::FillRoundedRect {
+            x,
+            y,
+            w,
+            h,
+            radius_x,
+            radius_y,
+            rgba: color,
+        });
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_stroke_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius_x: f32,
+        radius_y: f32,
+        stroke_width: f32,
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_stroke_rounded_rect called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter().execute(&DrawCmd::StrokeRoundedRect {
+            x,
+            y,
+            w,
+            h,
+            radius_x,
+            radius_y,
+            stroke_width,
+            rgba: color,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn cmd_fill_ellipse(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_fill_ellipse called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter().execute(&DrawCmd::FillEllipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            rgba: color,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn cmd_stroke_ellipse(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        stroke_width: f32,
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_stroke_ellipse called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter().execute(&DrawCmd::StrokeEllipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            stroke_width,
+            rgba: color,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn cmd_push_clip_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_push_clip_rect called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter()
+            .execute(&DrawCmd::PushClipRect { x, y, w, h });
+        Ok(())
+    }
+
+    pub(crate) fn cmd_pop_clip(&mut self) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_pop_clip called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter().execute(&DrawCmd::PopClip);
+        Ok(())
+    }
+
+    pub(crate) fn cmd_set_transform(&mut self, matrix: [f32; 6]) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_set_transform called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter()
+            .execute(&DrawCmd::SetTransform { matrix });
+        Ok(())
+    }
+
+    pub(crate) fn cmd_reset_transform(&mut self) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_reset_transform called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter().execute(&DrawCmd::ResetTransform);
         Ok(())
     }
 
