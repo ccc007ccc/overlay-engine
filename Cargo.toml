@@ -1,0 +1,21 @@
+# Cargo workspace 根
+#
+# 成员：
+# - rust-renderer  渲染引擎 cdylib（renderer.dll）
+#
+# Profile 必须在 workspace root，所有成员共享。
+
+[workspace]
+resolver = "2"
+members = [
+    "rust-renderer",
+]
+
+[profile.release]
+# rust-renderer 期望的优化（保持 cdylib 体积/启动）
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

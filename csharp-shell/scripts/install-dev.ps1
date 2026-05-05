@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     OverlayWidget one-shot dev install: cert + sign + Add-AppxPackage.
 
@@ -98,13 +98,17 @@ else {
 
 # Step 3: locate MSIX
 Write-Host "[3/5] Locating MSIX..." -ForegroundColor Cyan
-$pattern = "_${Platform}_${Configuration}"
+# UWP SideloadOnly 模式下 AppPackages 目录后缀只有 `_Test`（不带 Configuration），
+# eg. `OverlayWidget_0.1.0.0_x64_Test\OverlayWidget_0.1.0.0_x64.msix`。
+# 所以按 .msix 文件名的 `_<Platform>.msix` 后缀匹配，再按 LastWriteTime 取最新一次构建。
+# Configuration 区分由 msbuild 决定 MSIX 内容，不影响文件路径选择。
+$pattern = "_${Platform}\.msix$"
 $msixCandidates = Get-ChildItem -Path $AppPackagesDir -Filter "OverlayWidget_*.msix" -Recurse -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -match $pattern } |
+    Where-Object { $_.Name -match $pattern } |
     Sort-Object LastWriteTime -Descending
 
 if (-not $msixCandidates -or $msixCandidates.Count -eq 0) {
-    throw "MSIX not found under $AppPackagesDir for $Platform/$Configuration. Run MSBuild first."
+    throw "MSIX not found under $AppPackagesDir for $Platform. Run MSBuild first."
 }
 $msix = $msixCandidates[0].FullName
 Write-Host "  $msix" -ForegroundColor Green
@@ -136,12 +140,61 @@ if (Test-Path $depsDir) {
         ForEach-Object { $_.FullName }
 }
 
-if ($depPaths.Count -gt 0) {
-    Write-Host "  with $($depPaths.Count) framework dependencies from $depsDir" -ForegroundColor Yellow
-    Add-AppxPackage -Path $msix -DependencyPath $depPaths
+# Skip framework deps that are already installed at-or-above the bundled version.
+# Most Windows machines have these via Windows Update; trying to (re)install them while
+# Store / StorePurchaseApp has them loaded triggers HRESULT 0x80073D02 (RESOURCE_IN_USE).
+# 文件名形如 Microsoft.NET.Native.Runtime.2.2.appx → package name = filename without ext。
+function Test-FrameworkDepInstalled {
+    param([string]$DepPath)
+    $pkgName = [System.IO.Path]::GetFileNameWithoutExtension($DepPath)
+    $existing = Get-AppxPackage -Name $pkgName -ErrorAction SilentlyContinue
+    return ($null -ne $existing)
+}
+
+$missingDeps = @()
+foreach ($d in $depPaths) {
+    if (Test-FrameworkDepInstalled $d) {
+        Write-Host "  skip (already installed): $(Split-Path $d -Leaf)" -ForegroundColor DarkGray
+    } else {
+        $missingDeps += $d
+    }
+}
+
+# 0x80073D02 重试：先正常装；遇 RESOURCE_IN_USE 改 -ForceApplicationShutdown 再来一次。
+# Add-AppxPackage 的 HResult / Message 都带 0x80073D02，按 Message 匹配最稳。
+function Invoke-AddAppxWithRetry {
+    param(
+        [string]$Msix,
+        [string[]]$Deps
+    )
+    $params = @{ Path = $Msix; ErrorAction = 'Stop' }
+    if ($Deps -and $Deps.Count -gt 0) { $params.DependencyPath = $Deps }
+
+    try {
+        Add-AppxPackage @params
+        return
+    } catch {
+        if ($_.Exception.Message -notmatch '0x80073D02') { throw }
+        Write-Host "  resource in use (0x80073D02), retrying with -ForceApplicationShutdown..." -ForegroundColor Yellow
+    }
+
+    $params.ForceApplicationShutdown = $true
+    try {
+        Add-AppxPackage @params
+    } catch {
+        if ($_.Exception.Message -match '0x80073D02') {
+            throw "Add-AppxPackage failed with 0x80073D02 even after -ForceApplicationShutdown. Close Microsoft Store manually (or run 'wsreset'), then retry."
+        }
+        throw
+    }
+}
+
+if ($missingDeps.Count -gt 0) {
+    Write-Host "  installing with $($missingDeps.Count) framework dependencies from $depsDir" -ForegroundColor Yellow
+    Invoke-AddAppxWithRetry -Msix $msix -Deps $missingDeps
 }
 else {
-    Add-AppxPackage -Path $msix
+    Invoke-AddAppxWithRetry -Msix $msix
 }
 Write-Host "  installed" -ForegroundColor Green
 Write-Host ""

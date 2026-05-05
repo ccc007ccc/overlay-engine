@@ -1,4 +1,5 @@
 # Rust
+/target/
 /rust-renderer/target/
 **/Cargo.lock.bak
 

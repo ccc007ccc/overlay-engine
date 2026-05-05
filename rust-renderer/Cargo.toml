@@ -33,10 +33,4 @@ thiserror = "2"
 # V1 加：Renderer 句柄外层用 Mutex 串行化跨线程访问（C# pump 线程 + UI 线程）
 parking_lot = "0.12"
 
-[profile.release]
-lto = "thin"
-codegen-units = 1
-panic = "abort"
-
-[profile.dev]
-panic = "abort"
+# profile 段已移到 workspace 根 Cargo.toml（cargo 要求 profile 只能在 workspace root）。
