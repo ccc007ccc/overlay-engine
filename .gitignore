@@ -4,9 +4,9 @@
 **/Cargo.lock.bak
 
 # C# / UWP
-/csharp-shell/bin/
-/csharp-shell/obj/
-/csharp-shell/AppPackages/
+/monitors/game-bar-widget/bin/
+/monitors/game-bar-widget/obj/
+/monitors/game-bar-widget/AppPackages/
 
 # 第三方参考代码（不在主仓库管理 —— clone 时按 README 说明自取）
 /vendor/

@@ -34,6 +34,25 @@ pub const RENDERER_ERR_FRAME_HELD: RendererStatus = -6;
 /// 渲染失败（D2D EndDraw / Present 等返非零 HRESULT）。
 pub const RENDERER_ERR_FRAME_ACQUIRE: RendererStatus = -7;
 
+// ---------- v0.7 phase 2 资源系统 ----------
+/// Bitmap / Video / Capture handle 失效（已 destroy 或从未存在 / generation 不匹配）。
+pub const RENDERER_ERR_RESOURCE_NOT_FOUND: RendererStatus = -8;
+/// Slot table 满（默认 BITMAP_SLOT_CAPACITY = 1024）。
+pub const RENDERER_ERR_RESOURCE_LIMIT: RendererStatus = -9;
+/// 图片 / 视频 / 纹理解码失败。
+pub const RENDERER_ERR_DECODE_FAIL: RendererStatus = -10;
+/// 文件 IO 失败（不存在、权限不足、读写错）。
+pub const RENDERER_ERR_IO: RendererStatus = -11;
+/// 编码 / opcode 不支持（含 path opcode 0x06+ 保留区间）。
+pub const RENDERER_ERR_UNSUPPORTED_FORMAT: RendererStatus = -12;
+/// WGC 初始化失败 / 系统不支持（保留给 phase 4 capture 使用，phase 2 不构造）。
+#[allow(dead_code)]
+pub const RENDERER_ERR_CAPTURE_INIT: RendererStatus = -13;
+/// `renderer_resize_canvas` 主动 ResizeBuffers / 重建 D2D bitmap render target 失败
+/// （含 device-lost）。v0.7 lazy-resize 实现下不构造，保留给后续 phase 切到主动模式时使用。
+#[allow(dead_code)]
+pub const RENDERER_ERR_CANVAS_RESIZE_FAIL: RendererStatus = -14;
+
 /// 日志回调函数指针。
 ///
 /// - `level`: 0=trace, 1=debug, 2=info, 3=warn, 4=error
@@ -87,6 +106,11 @@ impl Renderer {
         self.inner.lock().resize(width, height)
     }
 
+    /// v0.7 §2.6.3 — 显式 canvas 改尺寸（不动 swap chain；下次 begin_frame 自动重建）。
+    pub(crate) fn resize_canvas(&self, new_w: u32, new_h: u32) -> RendererResult<()> {
+        self.inner.lock().resize_canvas(new_w, new_h)
+    }
+
     /// v0.6 DComp：返回 swap chain 的 IUnknown raw pointer（AddRef 给 C#）
     pub(crate) fn get_swapchain_iunknown(&self) -> *mut c_void {
         self.inner.lock().get_swapchain_iunknown()
@@ -131,6 +155,7 @@ impl Renderer {
 
     // ===== v0.7 矢量图元（薄转发到 RendererState） =====
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_draw_line(
         &self,
         x0: f32,
@@ -172,6 +197,7 @@ impl Renderer {
             .cmd_stroke_rect(x, y, w, h, stroke_width, color)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_fill_rounded_rect(
         &self,
         x: f32,
@@ -249,6 +275,68 @@ impl Renderer {
 
     pub(crate) fn cmd_reset_transform(&self) -> RendererResult<()> {
         self.inner.lock().cmd_reset_transform()
+    }
+
+    // ===== v0.7 phase 2 bitmap 资源 =====
+
+    pub(crate) fn load_bitmap_from_memory(
+        &self,
+        bytes: &[u8],
+    ) -> RendererResult<crate::renderer::resources::BitmapHandle> {
+        self.inner.lock().load_bitmap_from_memory(bytes)
+    }
+
+    pub(crate) fn create_texture(
+        &self,
+        width: u32,
+        height: u32,
+        format: i32,
+    ) -> RendererResult<crate::renderer::resources::BitmapHandle> {
+        self.inner.lock().create_texture(width, height, format)
+    }
+
+    pub(crate) fn update_texture(
+        &self,
+        h: crate::renderer::resources::BitmapHandle,
+        bytes: &[u8],
+        stride: i32,
+        format: i32,
+    ) -> RendererResult<()> {
+        self.inner.lock().update_texture(h, bytes, stride, format)
+    }
+
+    pub(crate) fn get_bitmap_size(
+        &self,
+        h: crate::renderer::resources::BitmapHandle,
+    ) -> RendererResult<(u32, u32)> {
+        self.inner.lock().get_bitmap_size(h)
+    }
+
+    pub(crate) fn destroy_bitmap(
+        &self,
+        h: crate::renderer::resources::BitmapHandle,
+    ) -> RendererResult<()> {
+        self.inner.lock().destroy_bitmap(h)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_draw_bitmap(
+        &self,
+        bitmap: crate::renderer::resources::BitmapHandle,
+        src_x: f32,
+        src_y: f32,
+        src_w: f32,
+        src_h: f32,
+        dst_x: f32,
+        dst_y: f32,
+        dst_w: f32,
+        dst_h: f32,
+        opacity: f32,
+        interp_mode: i32,
+    ) -> RendererResult<()> {
+        self.inner.lock().cmd_draw_bitmap(
+            bitmap, src_x, src_y, src_w, src_h, dst_x, dst_y, dst_w, dst_h, opacity, interp_mode,
+        )
     }
 
     /// v0.6 DComp end_frame：内部 EndDraw + Present(0, 0)。无 out 参数。

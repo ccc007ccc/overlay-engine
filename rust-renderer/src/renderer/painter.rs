@@ -12,7 +12,7 @@
 //! ## v0.7 命令分发
 //!
 //! 按 spec painter-abi-v0.7 第 10.5 节决策：painter 内部业务级操作通过 `enum DrawCmd`
-//! + `match` 派发。这是为未来 v0.8+ 命令流（录制 / 回放 / 序列化 / debug 工具）铺路 —
+//! 加 `match` 派发。这是为未来 v0.8+ 命令流（录制 / 回放 / 序列化 / debug 工具）铺路 ——
 //! enum 直接是天然序列化对象，今天「绕一道弯」避免明天大重构。
 //!
 //! 老 3 个命令（clear / fill_rect / draw_text）保留直调入口（向前兼容、热路径），
@@ -55,15 +55,18 @@ use windows::core::{w, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
+    D2D_RECT_U, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
     ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_FLAT,
-    D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DASH_DOT, D2D1_DASH_STYLE_DOT, D2D1_DASH_STYLE_SOLID,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LINE_JOIN_MITER,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1, D2D1_STROKE_TRANSFORM_TYPE_NORMAL,
+    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+    D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DASH_DOT, D2D1_DASH_STYLE_DOT,
+    D2D1_DASH_STYLE_SOLID, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_ELLIPSE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+    D2D1_LINE_JOIN_MITER, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
+    D2D1_STROKE_TRANSFORM_TYPE_NORMAL,
 };
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Graphics::DirectWrite::{
@@ -75,6 +78,9 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::IDXGISurface;
 
 use crate::error::{RendererError, RendererResult};
+
+use super::resources::{BitmapHandle, ResourceTable};
+use super::wic::WicDecoder;
 
 /// font_size 量化到 0.25 px 精度（size * 4）。Segoe UI / NORMAL weight / NORMAL style 固定。
 type TextFormatKey = u32;
@@ -103,6 +109,44 @@ pub const DASH_STYLE_DOT: i32 = 2;
 #[allow(dead_code)]
 pub const DASH_STYLE_DASH_DOT: i32 = 3;
 
+// ============================================================
+// v0.7 phase 2 bitmap format / interpolation 常量（与 ABI 一致）
+// ============================================================
+
+/// `renderer_create_texture` 用：BGRA8 premultiplied alpha（D2D 默认）
+#[allow(dead_code)]
+pub const TEXTURE_FORMAT_BGRA8: i32 = 0;
+/// RGBA8 premultiplied alpha（业务方常见输入；内部转 BGRA8 上传）
+#[allow(dead_code)]
+pub const TEXTURE_FORMAT_RGBA8: i32 = 1;
+/// NV12（视频常见，phase 2 暂只支持 Y plane 灰度，phase 3 视频接通时补全）
+#[allow(dead_code)]
+pub const TEXTURE_FORMAT_NV12: i32 = 2;
+
+/// `renderer_draw_bitmap` 的 interpolation mode
+#[allow(dead_code)]
+pub const INTERP_NEAREST: i32 = 0;
+#[allow(dead_code)]
+pub const INTERP_LINEAR: i32 = 1;
+
+// ============================================================
+// v0.7 phase 2 bitmap 资源类型
+// ============================================================
+
+/// 一个 bitmap slot 内部存的实体。所有来源（file / memory / 外部 texture）
+/// 最终都是一个 ID2D1Bitmap1，painter 不区分来源。
+///
+/// 元数据（width / height / source kind）随 bitmap 同生命周期，便于 get_size
+/// 和未来的 update_texture 校验。
+pub(crate) struct BitmapResource {
+    pub bitmap: ID2D1Bitmap1,
+    pub width: u32,
+    pub height: u32,
+    /// 是否支持 update_texture（即创建时给了 CPU_READ + 没绑 RT）
+    /// File / memory 加载的 bitmap 不允许 update_texture；只有 create_texture 创建的才允许
+    pub updatable: bool,
+}
+
 /// D2D + DWrite 全局引擎，跟 GpuDevice 一样长生命周期
 pub(crate) struct D2DEngine {
     /// 用于创建 D2D Bitmap1（包装 D3D11 RT）
@@ -123,6 +167,12 @@ pub(crate) struct D2DEngine {
     /// v0.7：D2D StrokeStyle 缓存。Stroke style 与 factory 绑定不与 dc/RT 绑定，跨 resize 长存。
     /// 仅 4 种 dash 模式（实线/划/点/划点），命中率接近 100%。
     stroke_style_cache: RefCell<HashMap<StrokeStyleKey, ID2D1StrokeStyle>>,
+
+    /// v0.7 phase 2：WIC 解码器（PNG/JPG/...→ IWICBitmapSource）
+    wic: WicDecoder,
+    /// v0.7 phase 2：bitmap 资源表（slot 1024，ABA generation 防护）。
+    /// `&self` 加载方法用 RefCell 内部可变。
+    pub(crate) bitmaps: RefCell<ResourceTable<BitmapResource>>,
 }
 
 // SAFETY: D2D / DWrite 在 SINGLE_THREADED / SHARED factory 下都是单线程使用。
@@ -160,9 +210,12 @@ impl D2DEngine {
             DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).map_err(RendererError::DeviceInit)?
         };
 
+        // 5) v0.7 phase 2：WIC factory（CoInitializeEx 在内部一次性做）
+        let wic = WicDecoder::create()?;
+
         crate::log::emit(
             2,
-            "D2DEngine created (D2D1 + DirectWrite, BGRA8 premul, text/brush cache enabled)",
+            "D2DEngine created (D2D1 + DirectWrite + WIC, BGRA8 premul, text/brush/bitmap caches enabled)",
         );
 
         Ok(Self {
@@ -173,6 +226,8 @@ impl D2DEngine {
             text_format_cache: RefCell::new(HashMap::with_capacity(8)),
             brush_cache: RefCell::new(HashMap::with_capacity(16)),
             stroke_style_cache: RefCell::new(HashMap::with_capacity(4)),
+            wic,
+            bitmaps: RefCell::new(ResourceTable::new()),
         })
     }
 
@@ -274,7 +329,10 @@ impl D2DEngine {
 
     /// v0.7：按 dash_style 拿/造 ID2D1StrokeStyle。
     ///
-    /// 端点固定 FLAT，line join 固定 MITER。dash_style 不识别（< 0 或 > 3）→ 退到 SOLID。
+    /// 端点（startCap/endCap）固定 FLAT；**dashCap 用 ROUND**——D2D 内置 DOT 模式
+    /// 内部 dashes = [0, 2]，dash 长度 0 + dashCap=FLAT 会画 0 像素 → DOT/DASH_DOT 完全不可见。
+    /// ROUND 让每个点延伸成直径 stroke_width 的圆，DASH_DOT 中的点也能正确显示。
+    /// line join 固定 MITER。dash_style 不识别（< 0 或 > 3）→ 退到 SOLID。
     /// 命中：HashMap O(1) + clone（COM AddRef）≈ < 1us。
     /// 未命中：CreateStrokeStyle ~50us，4 种 dash 模式上限即缓存满。
     fn get_stroke_style(&self, dash_style: i32) -> Option<ID2D1StrokeStyle> {
@@ -297,7 +355,7 @@ impl D2DEngine {
         let props = D2D1_STROKE_STYLE_PROPERTIES1 {
             startCap: D2D1_CAP_STYLE_FLAT,
             endCap: D2D1_CAP_STYLE_FLAT,
-            dashCap: D2D1_CAP_STYLE_FLAT,
+            dashCap: D2D1_CAP_STYLE_ROUND,
             lineJoin: D2D1_LINE_JOIN_MITER,
             miterLimit: 10.0,
             dashStyle: dash,
@@ -320,6 +378,217 @@ impl D2DEngine {
         cache.insert(key, style.clone());
         Some(style)
     }
+
+    // ============================================================
+    // v0.7 phase 2 bitmap 资源 API（从 D2DEngine 角度）
+    // ============================================================
+    //
+    // 设计：所有方法都用 `&self` + RefCell（bitmaps 字段）。
+    // 调用方（Renderer / RendererState）通过外层 Mutex 串行化，所以 RefCell 借用安全。
+    //
+    // load_* 不需要 begin_frame —— 它们是「构造资源」操作，与帧无关。
+    // draw_bitmap 才需要 begin_frame（在 Painter::execute 里走 DrawCmd::DrawBitmap）。
+
+    /// 从内存字节解码（PNG/JPG/BMP/GIF/WEBP）→ ID2D1Bitmap1 → slot table。
+    pub(crate) fn load_bitmap_from_memory(&self, bytes: &[u8]) -> RendererResult<BitmapHandle> {
+        let wic_source = self.wic.decode_to_pbgra(bytes)?;
+
+        // WIC source → D2D bitmap。CreateBitmapFromWicBitmap 自动 GPU 上传。
+        // bitmap properties 必须显式给 PBGRA + premultiplied，与 WIC 输出对齐。
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: ManuallyDrop::new(None),
+        };
+        let bitmap = unsafe {
+            self.dc
+                .CreateBitmapFromWicBitmap(&wic_source, Some(&props))
+                .map_err(RendererError::DecodeFail)?
+        };
+
+        // 拿尺寸
+        let size = unsafe { bitmap.GetPixelSize() };
+        let res = BitmapResource {
+            bitmap,
+            width: size.width,
+            height: size.height,
+            updatable: false,
+        };
+        self.bitmaps.borrow_mut().insert(res)
+    }
+
+    /// 创建一个空 bitmap，业务后续 update_texture 喂数据。
+    /// 当前只支持 BGRA8 / RGBA8（NV12 phase 3 视频接通时补）。
+    pub(crate) fn create_texture(
+        &self,
+        width: u32,
+        height: u32,
+        format: i32,
+    ) -> RendererResult<BitmapHandle> {
+        if width == 0 || height == 0 {
+            return Err(RendererError::InvalidParam("zero size on create_texture"));
+        }
+        match format {
+            x if x == TEXTURE_FORMAT_BGRA8 || x == TEXTURE_FORMAT_RGBA8 => {}
+            x if x == TEXTURE_FORMAT_NV12 => {
+                return Err(RendererError::UnsupportedFormat(
+                    "NV12 not supported until phase 3 video pipeline",
+                ));
+            }
+            _ => {
+                return Err(RendererError::InvalidParam(
+                    "unknown texture format constant",
+                ));
+            }
+        }
+
+        // 创建空 bitmap：D2D1_BITMAP_OPTIONS_NONE = 默认（CPU 可写）
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: ManuallyDrop::new(None),
+        };
+        let size = D2D_SIZE_U { width, height };
+        let bitmap = unsafe {
+            self.dc
+                .CreateBitmap(size, None, 0, &props)
+                .map_err(RendererError::DecodeFail)?
+        };
+        let res = BitmapResource {
+            bitmap,
+            width,
+            height,
+            updatable: true,
+        };
+        self.bitmaps.borrow_mut().insert(res)
+    }
+
+    /// 上传一帧像素到外部纹理。要求该 handle 是 create_texture 创建的（updatable=true）。
+    /// stride = 每行字节数（含 padding）。RGBA8 输入会就地翻转 R/B 转 BGRA8。
+    pub(crate) fn update_texture(
+        &self,
+        h: BitmapHandle,
+        bytes: &[u8],
+        stride: i32,
+        format: i32,
+    ) -> RendererResult<()> {
+        if stride <= 0 {
+            return Err(RendererError::InvalidParam("non-positive stride"));
+        }
+        // format 白名单 —— 不识别就拒，避免业务方拿 NV12 / 未知值「静默」走 BGRA 路径，
+        // 上传出乱码画面后到处排查。NV12 留 phase 3 视频接通时补全。
+        match format {
+            x if x == TEXTURE_FORMAT_BGRA8 || x == TEXTURE_FORMAT_RGBA8 => {}
+            x if x == TEXTURE_FORMAT_NV12 => {
+                return Err(RendererError::UnsupportedFormat(
+                    "NV12 update not supported until phase 3 video pipeline",
+                ));
+            }
+            _ => {
+                return Err(RendererError::InvalidParam(
+                    "unknown texture format constant",
+                ));
+            }
+        }
+        let stride_u = stride as u32;
+
+        let mut bitmaps = self.bitmaps.borrow_mut();
+        let res = bitmaps.get_mut(h)?;
+        if !res.updatable {
+            return Err(RendererError::InvalidParam(
+                "bitmap not updatable (loaded from file/memory, not create_texture)",
+            ));
+        }
+        // BGRA8 / RGBA8 都是 4 bytes/pixel —— stride 至少要够装一行像素，否则
+        // swizzle_rgba_to_bgra 会跨行读源 buffer，画面错位（而 buffer 总长够时不 panic，
+        // 是肉眼难查的语义 bug）。
+        let min_stride = (res.width as usize) * 4;
+        if (stride_u as usize) < min_stride {
+            return Err(RendererError::InvalidParam(
+                "stride less than width * 4 bytes",
+            ));
+        }
+        let expected = (res.height as usize).saturating_mul(stride_u as usize);
+        if bytes.len() < expected {
+            return Err(RendererError::InvalidParam(
+                "bytes shorter than height * stride",
+            ));
+        }
+
+        // RGBA8 → BGRA8 swizzle（CPU 端做，alloc 一份临时 buffer）。
+        // 性能上每帧上传几兆数据时 swizzle ~纯内存带宽，不算瓶颈；将来可改 PS shader。
+        let upload_buf: Vec<u8>;
+        let upload_slice: &[u8] = if format == TEXTURE_FORMAT_RGBA8 {
+            upload_buf = swizzle_rgba_to_bgra(bytes, res.width, res.height, stride_u);
+            &upload_buf
+        } else {
+            // BGRA8：直接用
+            bytes
+        };
+
+        let dst = D2D_RECT_U {
+            left: 0,
+            top: 0,
+            right: res.width,
+            bottom: res.height,
+        };
+        unsafe {
+            res.bitmap
+                .CopyFromMemory(
+                    Some(&dst),
+                    upload_slice.as_ptr() as *const _,
+                    stride_u,
+                )
+                .map_err(RendererError::DecodeFail)?;
+        }
+        Ok(())
+    }
+
+    /// 取 bitmap 尺寸。失效 handle → ResourceNotFound。
+    pub(crate) fn get_bitmap_size(&self, h: BitmapHandle) -> RendererResult<(u32, u32)> {
+        let bitmaps = self.bitmaps.borrow();
+        let res = bitmaps.get(h)?;
+        Ok((res.width, res.height))
+    }
+
+    /// 显式释放 bitmap。已释放或失效 → ResourceNotFound（idempotent）。
+    pub(crate) fn destroy_bitmap(&self, h: BitmapHandle) -> RendererResult<()> {
+        // 拿出来 drop（COM ref 自动 Release）
+        let _ = self.bitmaps.borrow_mut().remove(h)?;
+        Ok(())
+    }
+}
+
+/// CPU 端 RGBA8 → BGRA8 swizzle。每像素 4 字节。
+/// 注意：bytes 可能比 width*4*height 大（stride 含 padding）—— 按 stride 行步进。
+fn swizzle_rgba_to_bgra(bytes: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
+    let row_bytes = (width as usize) * 4;
+    let h = height as usize;
+    let s = stride as usize;
+    let mut out = vec![0u8; s * h];
+    for y in 0..h {
+        let src_row = &bytes[y * s..y * s + row_bytes];
+        let dst_row = &mut out[y * s..y * s + row_bytes];
+        for x in 0..(width as usize) {
+            let i = x * 4;
+            // R G B A → B G R A
+            dst_row[i] = src_row[i + 2];
+            dst_row[i + 1] = src_row[i + 1];
+            dst_row[i + 2] = src_row[i];
+            dst_row[i + 3] = src_row[i + 3];
+        }
+    }
+    out
 }
 
 /// 每帧的高层绘制 API。生命周期仅在 `Frame::render` 调用期间有效。
@@ -523,6 +792,21 @@ pub enum DrawCmd {
     },
     /// 重置 transform 为「viewport 平移」（v0.6 默认）
     ResetTransform,
+    /// 绘制 bitmap。bitmap 必须先通过 `load_bitmap_from_*` 或 `create_texture` 创建。
+    /// `src_rect_*` 全 0 时 = 整个 bitmap。
+    DrawBitmap {
+        bitmap: BitmapHandle,
+        src_x: f32,
+        src_y: f32,
+        src_w: f32,
+        src_h: f32,
+        dst_x: f32,
+        dst_y: f32,
+        dst_w: f32,
+        dst_h: f32,
+        opacity: f32,
+        interp_mode: i32,
+    },
 }
 
 impl<'a> Painter<'a> {
@@ -603,11 +887,37 @@ impl<'a> Painter<'a> {
             DrawCmd::PopClip => self.do_pop_clip(),
             DrawCmd::SetTransform { matrix } => self.do_set_transform(*matrix),
             DrawCmd::ResetTransform => self.do_reset_transform(),
+            DrawCmd::DrawBitmap {
+                bitmap,
+                src_x,
+                src_y,
+                src_w,
+                src_h,
+                dst_x,
+                dst_y,
+                dst_w,
+                dst_h,
+                opacity,
+                interp_mode,
+            } => self.do_draw_bitmap(
+                *bitmap,
+                *src_x,
+                *src_y,
+                *src_w,
+                *src_h,
+                *dst_x,
+                *dst_y,
+                *dst_w,
+                *dst_h,
+                *opacity,
+                *interp_mode,
+            ),
         }
     }
 
     // -------- 私有实现：每个命令一个 do_* 方法 --------
 
+    #[allow(clippy::too_many_arguments)]
     fn do_draw_line(
         &mut self,
         x0: f32,
@@ -698,15 +1008,14 @@ impl<'a> Painter<'a> {
             bottom: y + h,
         };
         unsafe {
-            // DrawRectangle 返 Result，但 D2D 的 BeginDraw/EndDraw 模型里这种调用不会立刻失败，
-            // 失败会被推迟到 EndDraw —— 所以丢 Result 是 D2D 一贯做法。
-            let _ = self
-                .engine
+            // windows-rs 0.59 中 DrawRectangle 返 ()（D2D 的失败推迟到 EndDraw 才报）。
+            self.engine
                 .dc
                 .DrawRectangle(&rect, &brush, stroke_width, style.as_ref());
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn do_fill_rounded_rect(
         &mut self,
         x: f32,
@@ -821,7 +1130,7 @@ impl<'a> Painter<'a> {
         unsafe {
             // 用 ALIASED 不开抗锯齿（clip 边缘走整像素，常见预期）。
             // 业务想要 antialiased 边缘可以用 transform + 矢量描边自己包。
-            let _ = self.engine.dc.PushAxisAlignedClip(
+            self.engine.dc.PushAxisAlignedClip(
                 &rect,
                 windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED,
             );
@@ -830,19 +1139,28 @@ impl<'a> Painter<'a> {
 
     fn do_pop_clip(&mut self) {
         unsafe {
-            let _ = self.engine.dc.PopAxisAlignedClip();
+            self.engine.dc.PopAxisAlignedClip();
         }
     }
 
     fn do_set_transform(&mut self, m: [f32; 6]) {
         // m = [m11, m12, m21, m22, dx, dy]
+        //
+        // 关键:业务传入的矩阵作用于 canvas-space 坐标,但 D2D RT 是 viewport-local —
+        // begin_frame 已经 SetTransform(translate(-vp_x, -vp_y)) 把 canvas → RT。
+        // 业务调 set_transform 时必须保留这个 viewport translate,否则旋转/缩放后的
+        // 命令会丢掉 viewport 偏移,在 widget 缩小/移位后(vp_x/vp_y 非零)位置漂走。
+        //
+        // D2D 行向量约定:final_point = src_point ∗ M_business ∗ T_viewport。
+        // 复合矩阵 M_business ∗ T_viewport 仅平移分量受 T_vp 影响:dx → dx - vp_x。
+        let (vx, vy) = self.viewport_origin;
         let mat = Matrix3x2 {
             M11: m[0],
             M12: m[1],
             M21: m[2],
             M22: m[3],
-            M31: m[4],
-            M32: m[5],
+            M31: m[4] - vx,
+            M32: m[5] - vy,
         };
         unsafe {
             self.engine.dc.SetTransform(&mat);
@@ -865,6 +1183,70 @@ impl<'a> Painter<'a> {
         };
         unsafe {
             self.engine.dc.SetTransform(&mat);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn do_draw_bitmap(
+        &mut self,
+        bitmap_handle: BitmapHandle,
+        src_x: f32,
+        src_y: f32,
+        src_w: f32,
+        src_h: f32,
+        dst_x: f32,
+        dst_y: f32,
+        dst_w: f32,
+        dst_h: f32,
+        opacity: f32,
+        interp_mode: i32,
+    ) {
+        // 借出 bitmap。bitmaps RefCell 借用持续 unsafe DrawBitmap 调用 —— 短作用域无重入。
+        let bitmaps = self.engine.bitmaps.borrow();
+        let res = match bitmaps.get(bitmap_handle) {
+            Ok(r) => r,
+            Err(_) => {
+                crate::log::emit(
+                    4,
+                    &format!("draw_bitmap: handle {:#x} not found / expired", bitmap_handle),
+                );
+                return;
+            }
+        };
+
+        // src_rect 全 0 视为整图
+        let src_rect_opt = if src_x == 0.0 && src_y == 0.0 && src_w == 0.0 && src_h == 0.0 {
+            None
+        } else {
+            Some(D2D_RECT_F {
+                left: src_x,
+                top: src_y,
+                right: src_x + src_w,
+                bottom: src_y + src_h,
+            })
+        };
+        let dst_rect = D2D_RECT_F {
+            left: dst_x,
+            top: dst_y,
+            right: dst_x + dst_w,
+            bottom: dst_y + dst_h,
+        };
+
+        let interp = if interp_mode == INTERP_NEAREST {
+            D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+        } else {
+            D2D1_INTERPOLATION_MODE_LINEAR
+        };
+
+        unsafe {
+            self.engine.dc.DrawBitmap(
+                &res.bitmap,
+                Some(&dst_rect),
+                opacity.clamp(0.0, 1.0),
+                interp,
+                src_rect_opt.as_ref().map(|r| r as *const _),
+                None, // perspective transform
+            );
         }
     }
 }

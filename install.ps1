@@ -11,7 +11,7 @@
 
     本脚本 = build-all.ps1 的外壳，语义上是"双脚本方案"的一半
     （另一半 = uninstall.ps1）。内部实现没变，全部委托给 build-all.ps1 +
-    csharp-shell/scripts/install-dev.ps1。
+    monitors/game-bar-widget/scripts/install-dev.ps1。
 
 .PARAMETER Configuration
     Debug 或 Release，默认 Release（.NET Native AOT，无 framework deps 依赖）。

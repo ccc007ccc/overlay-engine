@@ -49,6 +49,23 @@ namespace OverlayWidget.Native
         public const int RENDERER_ERR_NOT_ATTACHED = -5;
         public const int RENDERER_ERR_FRAME_HELD = -6;
         public const int RENDERER_ERR_FRAME_ACQUIRE = -7;
+        // v0.7 phase 2/3 — Bitmap & 外部纹理
+        public const int RENDERER_ERR_RESOURCE_NOT_FOUND = -8;
+        public const int RENDERER_ERR_RESOURCE_LIMIT = -9;
+        public const int RENDERER_ERR_DECODE_FAIL = -10;
+        public const int RENDERER_ERR_IO = -11;
+        public const int RENDERER_ERR_UNSUPPORTED_FORMAT = -12;
+        // v0.7 §2.6.3 — 画布管理（renderer_resize_canvas 失败专用）
+        public const int RENDERER_ERR_CANVAS_RESIZE_FAIL = -14;
+
+        // bitmap format（与 Rust 端 painter::BitmapFormat repr 一致）
+        public const int BITMAP_FORMAT_BGRA8 = 0;
+        public const int BITMAP_FORMAT_RGBA8 = 1;
+        public const int BITMAP_FORMAT_NV12 = 2;
+
+        // interp mode for renderer_draw_bitmap
+        public const int INTERP_NEAREST = 0;
+        public const int INTERP_LINEAR = 1;
 
         /// <summary>
         /// 滑动平均的 perf 统计（最近 N 帧）。字段顺序与 Rust <c>PerfStats</c> struct 一致。
@@ -103,6 +120,35 @@ namespace OverlayWidget.Native
             int pixelWidth,
             int pixelHeight);
 
+        /// <summary>
+        /// **v0.7 §2.6.3 新增**：显式画布管理 ABI。
+        ///
+        /// 在 SizeChanged / WM_SIZE / 用户改设置面板时调；**不要每帧调**
+        /// （ResizeBuffers 重分配 GPU 缓冲，per-frame 性能损失明显）。
+        /// 同尺寸 short-circuit 零开销；零尺寸或 begin_frame/end_frame 之间调用返错。
+        ///
+        /// 返回:
+        /// <list type="bullet">
+        /// <item><c>RENDERER_OK</c>(0)</item>
+        /// <item><c>RENDERER_ERR_INVALID_PARAM</c>(-1) — newW/newH ≤ 0 或 handle null</item>
+        /// <item><c>RENDERER_ERR_FRAME_HELD</c>(-6) — 当前在 begin_frame/end_frame 之间</item>
+        /// <item><c>RENDERER_ERR_CANVAS_RESIZE_FAIL</c>(-14) — ResizeBuffers / 重建 D2D bitmap 失败</item>
+        /// </list>
+        ///
+        /// widget 端典型用法（SizeChanged 事件）:
+        /// <code>
+        /// var dpi = ScreenInterop.GetDpiForWindow(...);
+        /// int physW = (int)(e.NewSize.Width * dpi / 96.0);
+        /// int physH = (int)(e.NewSize.Height * dpi / 96.0);
+        /// Renderer.renderer_resize_canvas(_handle, physW, physH);
+        /// </code>
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_resize_canvas(
+            IntPtr handle,
+            int newW,
+            int newH);
+
         [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
         public static extern void renderer_destroy(IntPtr handle);
 
@@ -147,6 +193,9 @@ namespace OverlayWidget.Native
         /// 取景框模式：业务每帧把 widget 在 canvas 中的位置/大小当 viewport 传入，
         /// 命令仍按全屏 canvas 坐标 → 画面相对屏幕坐标固定，widget 移动就像"挪取景框"。
         ///
+        /// **v0.7 新增**：outCanvasW / outCanvasH 写出当前画布尺寸（让业务做百分比布局）。
+        /// 不需要这两个值的旧业务可以传 IntPtr.Zero 跳过。
+        ///
         /// 重复 begin 不调 end 返 INVALID_PARAM。
         /// </summary>
         [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
@@ -155,7 +204,28 @@ namespace OverlayWidget.Native
             float viewportX,
             float viewportY,
             float viewportW,
-            float viewportH);
+            float viewportH,
+            IntPtr outCanvasW,
+            IntPtr outCanvasH);
+
+        /// <summary>
+        /// v0.7 重载：直接把画布尺寸读到 C# 的 out int 上（推荐用法）。
+        /// 内部签名仍是 i32* 指针；C# unsafe 段把 &amp;canvasW 转 IntPtr 后转发到上面那条 P/Invoke。
+        /// </summary>
+        public static unsafe int renderer_begin_frame(
+            IntPtr handle,
+            float viewportX, float viewportY,
+            float viewportW, float viewportH,
+            out int canvasW, out int canvasH)
+        {
+            int cw = 0, ch = 0;
+            int status = renderer_begin_frame(
+                handle, viewportX, viewportY, viewportW, viewportH,
+                (IntPtr)(&cw), (IntPtr)(&ch));
+            canvasW = cw;
+            canvasH = ch;
+            return status;
+        }
 
         /// <summary>清屏到指定颜色（premultiplied alpha：rgb ≤ a）。</summary>
         [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
@@ -367,6 +437,134 @@ namespace OverlayWidget.Native
                     return renderer_draw_text(
                         handle, (IntPtr)p, bytes.Length,
                         x, y, fontSize, r, g, b, a);
+                }
+            }
+        }
+
+        // ============================================================
+        // v0.7 Phase 2/3：Bitmap + 外部纹理
+        // ============================================================
+        //
+        // 句柄是不透明 uint，0 视作 invalid。生命周期由调用方维护：load/create_texture
+        // 拿到的 handle 必须在 renderer_destroy 之前调 renderer_destroy_bitmap 释放，
+        // 否则资源会留到 Renderer 整个生命周期结束。
+
+        /// <summary>
+        /// 从内存字节流解码（PNG/JPG/BMP/GIF/WEBP）→ ID2D1Bitmap。WIC 解码，BGRA8 premul。
+        /// 失败：DECODE_FAIL（格式不识别）/ RESOURCE_LIMIT（slot 满）/ DEVICE_INIT（D2D 创建失败）。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_load_bitmap_from_memory(
+            IntPtr handle,
+            IntPtr bytes,
+            int byteLen,
+            out uint outBitmap);
+
+        /// <summary>
+        /// 从 UTF-8 路径解码（不带 NUL）。失败补 IO（文件读不到）。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_load_bitmap_from_file(
+            IntPtr handle,
+            IntPtr utf8Path,
+            int pathLen,
+            out uint outBitmap);
+
+        /// <summary>
+        /// 创建空可写纹理。format: 0=BGRA8 / 1=RGBA8 / 2=NV12（NV12 暂未支持，会返回 UNSUPPORTED_FORMAT）。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_create_texture(
+            IntPtr handle,
+            uint width,
+            uint height,
+            int format,
+            out uint outBitmap);
+
+        /// <summary>
+        /// 上传一帧像素到 create_texture 出来的 bitmap。stride = 每行字节数。
+        /// format 必须与 create 时一致（这里再传一次只是冗余校验）。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_update_texture(
+            IntPtr handle,
+            uint bitmap,
+            IntPtr bytes,
+            int byteLen,
+            int stride,
+            int format);
+
+        /// <summary>查询 bitmap 像素尺寸（即 D2D 内部尺寸）。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_get_bitmap_size(
+            IntPtr handle,
+            uint bitmap,
+            out uint outWidth,
+            out uint outHeight);
+
+        /// <summary>销毁 bitmap。已 destroy / 未知句柄 → RESOURCE_NOT_FOUND（调用方按需当 idempotent）。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_destroy_bitmap(
+            IntPtr handle,
+            uint bitmap);
+
+        /// <summary>
+        /// 把 bitmap 画到 canvas。src_* 全 0 → 整个 bitmap；否则裁子矩形。dst 在 canvas 坐标。
+        /// interp_mode: 0=nearest, 1=linear。必须在 begin_frame / end_frame 之间调用。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_draw_bitmap(
+            IntPtr handle,
+            uint bitmap,
+            float srcX, float srcY, float srcW, float srcH,
+            float dstX, float dstY, float dstW, float dstH,
+            float opacity,
+            int interpMode);
+
+        /// <summary>
+        /// renderer_load_bitmap_from_memory 的便利包装。data 不能为空，调用期间 fix 一份指针。
+        /// </summary>
+        public static int LoadBitmapFromMemory(IntPtr handle, byte[] data, out uint outBitmap)
+        {
+            outBitmap = 0;
+            if (data == null || data.Length == 0) return RENDERER_ERR_INVALID_PARAM;
+            unsafe
+            {
+                fixed (byte* p = data)
+                {
+                    return renderer_load_bitmap_from_memory(handle, (IntPtr)p, data.Length, out outBitmap);
+                }
+            }
+        }
+
+        /// <summary>
+        /// renderer_update_texture 的便利包装。
+        /// </summary>
+        public static int UpdateTexture(IntPtr handle, uint bitmap, byte[] data, int stride, int format)
+        {
+            if (data == null || data.Length == 0) return RENDERER_ERR_INVALID_PARAM;
+            unsafe
+            {
+                fixed (byte* p = data)
+                {
+                    return renderer_update_texture(handle, bitmap, (IntPtr)p, data.Length, stride, format);
+                }
+            }
+        }
+
+        /// <summary>
+        /// renderer_load_bitmap_from_file 的便利包装。path UTF-8 编码后 fix 一份指针。
+        /// </summary>
+        public static int LoadBitmapFromFile(IntPtr handle, string path, out uint outBitmap)
+        {
+            outBitmap = 0;
+            if (string.IsNullOrEmpty(path)) return RENDERER_ERR_INVALID_PARAM;
+            byte[] bytes = Encoding.UTF8.GetBytes(path);
+            unsafe
+            {
+                fixed (byte* p = bytes)
+                {
+                    return renderer_load_bitmap_from_file(handle, (IntPtr)p, bytes.Length, out outBitmap);
                 }
             }
         }

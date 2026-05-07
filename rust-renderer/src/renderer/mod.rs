@@ -21,9 +21,13 @@
 
 pub(crate) mod device;
 pub(crate) mod painter;
+/// v0.7 phase 2：bitmap / video / capture handle 共享的 slot table + ABA 防护
+pub(crate) mod resources;
 /// v0.3 历史文件名，内部 OffscreenSurface 已重命名为 `PinnedReadbackBackend`，v0.6 改成 swap chain。
 /// 文件名保留以便 git blame 追溯历史。
 pub(crate) mod swapchain;
+/// v0.7 phase 2：WIC 图片解码 → IWICBitmapSource → ID2D1Bitmap1
+pub(crate) mod wic;
 
 use std::ffi::c_void;
 
@@ -83,6 +87,11 @@ impl RendererState {
         self.surface.resize(width, height)
     }
 
+    /// v0.7 §2.6.3 — 显式 canvas 改尺寸，cmd 帧中调用返 FrameStillHeld。
+    pub(crate) fn resize_canvas(&mut self, new_w: u32, new_h: u32) -> RendererResult<()> {
+        self.surface.resize_canvas(new_w, new_h)
+    }
+
     pub(crate) fn size(&self) -> (u32, u32) {
         self.surface.size()
     }
@@ -133,6 +142,7 @@ impl RendererState {
 
     // ===== v0.7 矢量图元（薄转发） =====
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_draw_line(
         &mut self,
         x0: f32,
@@ -170,6 +180,7 @@ impl RendererState {
         self.surface.cmd_stroke_rect(x, y, w, h, stroke_width, color)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_fill_rounded_rect(
         &mut self,
         x: f32,
@@ -244,6 +255,68 @@ impl RendererState {
 
     pub(crate) fn cmd_reset_transform(&mut self) -> RendererResult<()> {
         self.surface.cmd_reset_transform()
+    }
+
+    // ===== v0.7 phase 2 bitmap 资源 =====
+
+    pub(crate) fn load_bitmap_from_memory(
+        &mut self,
+        bytes: &[u8],
+    ) -> RendererResult<crate::renderer::resources::BitmapHandle> {
+        self.surface.load_bitmap_from_memory(bytes)
+    }
+
+    pub(crate) fn create_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: i32,
+    ) -> RendererResult<crate::renderer::resources::BitmapHandle> {
+        self.surface.create_texture(width, height, format)
+    }
+
+    pub(crate) fn update_texture(
+        &mut self,
+        h: crate::renderer::resources::BitmapHandle,
+        bytes: &[u8],
+        stride: i32,
+        format: i32,
+    ) -> RendererResult<()> {
+        self.surface.update_texture(h, bytes, stride, format)
+    }
+
+    pub(crate) fn get_bitmap_size(
+        &self,
+        h: crate::renderer::resources::BitmapHandle,
+    ) -> RendererResult<(u32, u32)> {
+        self.surface.get_bitmap_size(h)
+    }
+
+    pub(crate) fn destroy_bitmap(
+        &mut self,
+        h: crate::renderer::resources::BitmapHandle,
+    ) -> RendererResult<()> {
+        self.surface.destroy_bitmap(h)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_draw_bitmap(
+        &mut self,
+        bitmap: crate::renderer::resources::BitmapHandle,
+        src_x: f32,
+        src_y: f32,
+        src_w: f32,
+        src_h: f32,
+        dst_x: f32,
+        dst_y: f32,
+        dst_w: f32,
+        dst_h: f32,
+        opacity: f32,
+        interp_mode: i32,
+    ) -> RendererResult<()> {
+        self.surface.cmd_draw_bitmap(
+            bitmap, src_x, src_y, src_w, src_h, dst_x, dst_y, dst_w, dst_h, opacity, interp_mode,
+        )
     }
 
     /// v0.6 end_frame：内部 EndDraw + Present(0, 0)。不返 mapped pointer。

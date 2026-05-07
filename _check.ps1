@@ -1,8 +1,8 @@
 $paths = @(
-  'C:\code\Rust\overlay-widget\install.ps1',
-  'C:\code\Rust\overlay-widget\uninstall.ps1',
-  'C:\code\Rust\overlay-widget\build-all.ps1',
-  'C:\code\Rust\overlay-widget\csharp-shell\scripts\install-dev.ps1'
+  'C:\Users\user\project\_external\C\code-e6fb06\Rust-e2ae20\overlay--a393fb\install.ps1',
+  'C:\Users\user\project\_external\C\code-e6fb06\Rust-e2ae20\overlay--a393fb\uninstall.ps1',
+  'C:\Users\user\project\_external\C\code-e6fb06\Rust-e2ae20\overlay--a393fb\build-all.ps1',
+  'C:\Users\user\project\_external\C\code-e6fb06\Rust-e2ae20\overlay--a393fb\monitors\game-bar-widget\scripts\install-dev.ps1'
 )
 foreach ($p in $paths) {
   $bytes = [System.IO.File]::ReadAllBytes($p)

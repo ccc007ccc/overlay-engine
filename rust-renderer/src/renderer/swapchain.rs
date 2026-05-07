@@ -165,8 +165,7 @@ impl PinnedReadbackBackend {
             Ok(u) => u,
             Err(_) => return std::ptr::null_mut(),
         };
-        let raw = unk.into_raw();
-        raw
+        unk.into_raw()
     }
 
     /// v0.6 DComp 入口：开启一帧。
@@ -314,6 +313,7 @@ impl PinnedReadbackBackend {
         p
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_draw_line(
         &mut self,
         x0: f32,
@@ -387,6 +387,7 @@ impl PinnedReadbackBackend {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_fill_rounded_rect(
         &mut self,
         x: f32,
@@ -540,6 +541,91 @@ impl PinnedReadbackBackend {
         Ok(())
     }
 
+    // ============================================================
+    // v0.7 phase 2 bitmap 资源 API
+    // ============================================================
+    //
+    // load_* / create_texture / update_texture / get_size / destroy 不需要 begin_frame。
+    // 它们是「构造资源」，与帧无关，反复调用安全（在 Mutex 串行化下）。
+    //
+    // draw_bitmap 才需要 begin_frame —— 走 DrawCmd::DrawBitmap。
+
+    pub(crate) fn load_bitmap_from_memory(
+        &mut self,
+        bytes: &[u8],
+    ) -> RendererResult<crate::renderer::resources::BitmapHandle> {
+        self.d2d.load_bitmap_from_memory(bytes)
+    }
+
+    pub(crate) fn create_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: i32,
+    ) -> RendererResult<crate::renderer::resources::BitmapHandle> {
+        self.d2d.create_texture(width, height, format)
+    }
+
+    pub(crate) fn update_texture(
+        &mut self,
+        h: crate::renderer::resources::BitmapHandle,
+        bytes: &[u8],
+        stride: i32,
+        format: i32,
+    ) -> RendererResult<()> {
+        self.d2d.update_texture(h, bytes, stride, format)
+    }
+
+    pub(crate) fn get_bitmap_size(
+        &self,
+        h: crate::renderer::resources::BitmapHandle,
+    ) -> RendererResult<(u32, u32)> {
+        self.d2d.get_bitmap_size(h)
+    }
+
+    pub(crate) fn destroy_bitmap(
+        &mut self,
+        h: crate::renderer::resources::BitmapHandle,
+    ) -> RendererResult<()> {
+        self.d2d.destroy_bitmap(h)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_draw_bitmap(
+        &mut self,
+        bitmap: crate::renderer::resources::BitmapHandle,
+        src_x: f32,
+        src_y: f32,
+        src_w: f32,
+        src_h: f32,
+        dst_x: f32,
+        dst_y: f32,
+        dst_w: f32,
+        dst_h: f32,
+        opacity: f32,
+        interp_mode: i32,
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_draw_bitmap called outside begin_frame/end_frame",
+            ));
+        }
+        self.make_painter().execute(&DrawCmd::DrawBitmap {
+            bitmap,
+            src_x,
+            src_y,
+            src_w,
+            src_h,
+            dst_x,
+            dst_y,
+            dst_w,
+            dst_h,
+            opacity,
+            interp_mode,
+        });
+        Ok(())
+    }
+
     /// v0.6 DComp 入口：提交一帧 → EndDraw + Present(0, 0)。
     ///
     /// Present 触发 DComp 拉新内容（异步、跨线程安全）；不返 mapped pointer。
@@ -576,8 +662,6 @@ impl PinnedReadbackBackend {
         self.cmd_drawing = false;
 
         Ok(PresentFrame {
-            width: self.vp_w,
-            height: self.vp_h,
             render_us,
             present_us,
         })
@@ -619,6 +703,42 @@ impl PinnedReadbackBackend {
         Ok(())
     }
 
+    /// v0.7 §2.6.3 — 显式画布管理 ABI。
+    ///
+    /// 与 v0.6 `resize` 的区别：
+    /// - cmd_drawing 中调用 → 返 `FrameStillHeld`（不 emergency-end，host 自己决策）
+    /// - 同尺寸 short-circuit（spec 强制：零开销）
+    /// - 零尺寸 → `InvalidParam`
+    ///
+    /// 当前实现仅更新 canvas 字段；swap chain 大小仍由 begin_frame 按 viewport 决定
+    /// （兼容 v0.6 widget「画布固定 / DComp 拉伸」路径，spec §2.6.5 表）。
+    /// desktop-window「画布跟随物理像素」典型用法：紧跟 begin_frame(0, 0, new_w, new_h)
+    /// 自然触发 ResizeBuffers 把 swap chain 同步到新画布。
+    ///
+    /// `RENDERER_ERR_CANVAS_RESIZE_FAIL`(-14) 错误码当前不构造（lazy resize 路径下
+    /// 无 ResizeBuffers 调用），保留给后续 phase 主动 resize 模式用。
+    pub(crate) fn resize_canvas(&mut self, new_w: u32, new_h: u32) -> RendererResult<()> {
+        if new_w == 0 || new_h == 0 {
+            return Err(RendererError::InvalidParam("zero pixel size on resize_canvas"));
+        }
+        if self.cmd_drawing {
+            return Err(RendererError::FrameStillHeld);
+        }
+        if new_w == self.width && new_h == self.height {
+            return Ok(());
+        }
+        self.width = new_w;
+        self.height = new_h;
+        crate::log::emit(
+            2,
+            &format!(
+                "canvas resized to {}x{} (swap chain {}x{} unchanged; next begin_frame may rebuild)",
+                new_w, new_h, self.vp_w, self.vp_h
+            ),
+        );
+        Ok(())
+    }
+
     pub(crate) fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
@@ -626,9 +746,10 @@ impl PinnedReadbackBackend {
 
 /// v0.6 DComp `end_frame` 的返回值。不再有 mapped pointer / row_pitch / staging slot —
 /// DComp 拉 swap chain 自己合成，C# 不需要 readback。
+///
+/// 历史上还携带 width/height，但 mod.rs 只读 us 字段，C ABI 也只看 perf 计数器，
+/// 因此 v0.7 起裁掉两个尺寸字段。需要尺寸的地方直接调 `Renderer.size()`。
 pub(crate) struct PresentFrame {
-    pub width: u32,
-    pub height: u32,
     /// `begin_frame` → `end_frame` 之间所有 cmd_* + EndDraw 累积耗时
     pub render_us: u64,
     /// Present(0,0) 调用耗时（CPU 端时间，不等 GPU 完成）

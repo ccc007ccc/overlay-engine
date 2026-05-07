@@ -7,7 +7,7 @@
 
       1. cargo build --release  (rust-renderer/)         -> renderer.dll
       2. msbuild OverlayWidget.csproj /restore /p:...     -> *.msix
-      3. csharp-shell\scripts\install-dev.ps1             -> cert + signtool + Add-AppxPackage
+      3. monitors\game-bar-widget\scripts\install-dev.ps1  -> cert + signtool + Add-AppxPackage
 
     任意一步失败立刻退出（$ErrorActionPreference = 'Stop' 全程贯穿）。
 
@@ -54,7 +54,7 @@
     只产 MSIX，不动本机已安装的版本。
 
 .NOTES
-    - 与 csharp-shell\scripts\install-dev.ps1 配套：本脚本把"编译"那段补齐，
+    - 与 monitors\game-bar-widget\scripts\install-dev.ps1 配套：本脚本把"编译"那段补齐，
       install 复用既有的 cert / signtool / Add-AppxPackage 逻辑，DRY。
     - csproj 里 <Content Include="..\target\release\renderer.dll"> 写死了
       Rust release 输出路径——所以 -Configuration Debug 也用 release renderer.dll，符合预期
@@ -79,7 +79,7 @@ $ErrorActionPreference = 'Stop'
 
 $ProjectRoot   = $PSScriptRoot
 $RustDir       = Join-Path $ProjectRoot 'rust-renderer'
-$CsharpDir     = Join-Path $ProjectRoot 'csharp-shell'
+$CsharpDir     = Join-Path $ProjectRoot 'monitors\game-bar-widget'
 $Csproj        = Join-Path $CsharpDir 'OverlayWidget.csproj'
 $InstallScript = Join-Path $CsharpDir 'scripts\install-dev.ps1'
 # v0.7 起 workspace 根 target/，cargo 不再写 rust-renderer/target/。

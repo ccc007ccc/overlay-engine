@@ -19,7 +19,8 @@
 | 屏幕捕获 | Windows.Graphics.Capture（WinRT）→ D3D11 surface → 同 bitmap handle，区域裁剪走 `src_rect`（决策 10.3） |
 | Path opcode | 仅绝对坐标（0x01-0x05），0x80+ 留 SVG 相对坐标（决策 10.1） |
 | 资源句柄统一 | 三种来源（load/external/video/capture）输出**同一种** `BitmapHandle`，painter 只认 handle，不关心来源 |
-| ABI 兼容 | v0.6 老接口全部保留不动，新增 only |
+| **画布管理** | `renderer_resize_canvas` 显式 host 调（WM_SIZE 触发），`renderer_begin_frame` 新增 2 个出参告诉业务当前画布尺寸；**不引入 canvas_mode 枚举**——host 调用模式即策略（决策 10.8） |
+| ABI 兼容 | v0.6 老接口绝大多数保留；**`renderer_begin_frame` 签名破坏性变更**（加 2 个出参），其他 v0.6 ABI 不动 |
 | 实施分期 | 5 个 phase（2+3 合并），每 phase commit + tag（决策 10.6 / 10.7） |
 
 ## 1. 背景与范围
@@ -53,13 +54,51 @@ renderer_draw_text(utf8, ..., x, y, size, rgba)
 
 → 全部输出 `BitmapHandle`（u32），painter 只有一个 `draw_bitmap(handle, src_rect, dst_rect, opacity)`。
 
-### 1.3 不在范围
+**画布管理**（v0.7 新加）：
+
+`renderer_resize_canvas` + `renderer_begin_frame` 出参 → 让 host 在窗口 resize 时显式
+切画布；让业务每帧拿到当前画布尺寸做百分比布局。详细见 §2.6。
+
+### 1.3 画布与渲染分辨率
+
+v0.7 起明确「画布」语义——**画布 = D2D render target 像素数 = swap chain back buffer
+像素数 = 业务画图坐标系**，三位一体不分层。这意味着：
+
+1. 业务调 `fill_rect(640, 360, 200, 200, ...)` 时，(640, 360) 是**画布像素坐标**
+   （不是 logical pixel，不是 world unit，不是 DIP）
+2. 画布尺寸由 host 决定：创建时给初始尺寸（`renderer_create`）；运行时通过
+   `renderer_resize_canvas` 显式改
+3. 画布尺寸变了 → 内核内部 ResizeBuffers + 重建 D2D bitmap target；业务画的内容
+   按**新尺寸**重新解释（因此业务必须每帧调 `begin_frame` 拿当前画布尺寸）
+
+不引入 mode 枚举（不像 Bevy `ScalingMode` / Unity `Canvas Scaler`）。host 想要的所有
+策略都通过「调或不调 `resize_canvas`」实现：
+
+| host 想要的行为 | host 怎么做 |
+|---|---|
+| **画布跟随物理像素**（点对点，desktop-window 默认） | `winit::WindowEvent::Resized` → `resize_canvas(physical_w, physical_h)` |
+| **画布固定**（widget v0.6 行为，DComp 自动拉伸到 visual size） | 创建后**不调** `resize_canvas`，画布永远 = 初始尺寸 |
+| **用户面板选档位**（720p / 1080p / 4K） | 用户改设置 → host 调 `resize_canvas(选中档位)` |
+| **保持长宽比 letterbox** | host 算等比矩形 → `resize_canvas(等比 w, 等比 h)` + DComp visual.Size 留黑边 |
+
+业务侧应对画布变化的策略（**业务责任**，不是 ABI 责任）：
+
+- **百分比布局**：`fill_rect(canvas_w * 0.4, canvas_h * 0.4, canvas_w * 0.2, canvas_h * 0.2, ...)`
+- **纵向固定**（Bevy `FixedVertical` 风格）：内部记 `logical_h = 720`，每帧算
+  `scale = canvas_h / logical_h`，调 `set_transform(scale, 0, 0, scale, 0, 0)` 后
+  在 logical 坐标里画图
+- **绝对像素**（不自适应）：业务自己接受"窗口大就画面占比小"
+
+ABI 不替业务做选择。
+
+### 1.4 不在范围
 
 - 3D / mesh / shader 自定义（要做就是另一个 renderer）
 - 音频（视频是「画面」，声音由业务方走 MediaPlayer 自己播）
 - 字幕渲染（用 draw_text 自己合成）
 - 视频编码 / 录制（renderer 是 sink，不是 source）
-- 老接口语义变更
+- 画布 mode 枚举（FIXED / ADAPTIVE / STEPPED）—— host 调用模式即策略（决策 10.8）
+- DPI scale_factor 暴露 ABI——host 自己调 OS API（GetDpiForWindow），不污染 ABI
 
 ## 2. ABI 设计
 
@@ -93,6 +132,7 @@ RENDERER_ERR_DECODE_FAIL         = -10  // 图片/视频解码失败
 RENDERER_ERR_IO                  = -11  // 文件读取失败
 RENDERER_ERR_UNSUPPORTED_FORMAT  = -12  // 编码格式不支持
 RENDERER_ERR_CAPTURE_INIT        = -13  // WGC 初始化失败 / 系统不支持
+RENDERER_ERR_CANVAS_RESIZE_FAIL  = -14  // resize_canvas 时 ResizeBuffers / 重建 D2D target 失败
 ```
 
 ### 2.3 Painter 矢量图元 ABI
@@ -253,6 +293,123 @@ renderer_fill_rect_gradient_radial(
     stop_count: i32,
 ) -> RendererStatus
 ```
+
+### 2.6 画布管理（v0.7 新增）
+
+#### 2.6.1 概念契约
+
+见 §1.3：画布 = D2D render target = swap chain back buffer = 业务画图坐标系（三位一体）。
+画布尺寸由 host 决定（创建时初始尺寸；运行时通过 `renderer_resize_canvas` 显式改）。
+**没有 mode 枚举**——host 调用模式即策略（决策 10.8）。
+
+#### 2.6.2 `renderer_create` 语义微调（签名不变）
+
+```rust
+/// 创建 renderer。第二、三参数是**初始**画布尺寸；
+/// host 之后可通过 renderer_resize_canvas 任意改。
+renderer_create(
+    canvas_w: i32, canvas_h: i32,
+    out_handle: *mut *mut Renderer,
+) -> RendererStatus
+```
+
+签名跟 v0.6 字节级一致；仅文档语义从「不可变 canvas」放宽为「初始 canvas，
+之后可通过 resize_canvas 改」。v0.6 业务（widget v0.6）不调 resize_canvas，
+画布永远是初始尺寸——v0.6 行为完全保留。
+
+#### 2.6.3 `renderer_resize_canvas`
+
+```rust
+/// 改画布尺寸。内部触发 IDXGISwapChain1::ResizeBuffers + 重建 D2D bitmap target。
+///
+/// 调用时机：host 在 WM_SIZE / winit::WindowEvent::Resized / 用户改设置面板时调。
+/// **不要每帧调** —— ResizeBuffers 是重分配 GPU 缓冲（约 100us~1ms），每帧调
+/// 性能损失明显（Microsoft 官方文档明确禁止 per-frame resize）。
+///
+/// 同尺寸（new_w/new_h 与当前画布相等）调用是 no-op，内部 short-circuit，零开销。
+///
+/// 返：
+/// - 0 OK
+/// - -1 INVALID_PARAM   new_w 或 new_h ≤ 0
+/// - -14 CANVAS_RESIZE_FAIL  ResizeBuffers / 重建 D2D bitmap 失败（含 device-lost）
+/// - -6 FRAME_HELD     当前 frame 在 begin/end 之间（不允许 resize）
+renderer_resize_canvas(
+    h: *mut Renderer,
+    new_w: i32, new_h: i32,
+) -> RendererStatus
+```
+
+线程契约：跟其他 ABI 一致——单线程 / 外部互斥。host 应在与 begin/end_frame 同一线程
+调用，且不能在 begin_frame 之后、end_frame 之前调（返 FRAME_HELD）。
+
+#### 2.6.4 `renderer_begin_frame` 签名变更（破坏性）
+
+v0.6：
+```rust
+renderer_begin_frame(h, vp_x, vp_y, vp_w, vp_h) -> RendererStatus
+```
+
+v0.7：
+```rust
+/// 开始一帧。内部 SetTarget(bitmap) + BeginDraw + reset transform/clip。
+///
+/// `out_canvas_w` / `out_canvas_h`：本帧画布尺寸（业务画图坐标系上限）。
+/// 业务每帧应基于这两个值做百分比布局——画布尺寸可能在每次 begin_frame 之间
+/// 因 host 调 resize_canvas 而变。
+///
+/// 允许 NULL：业务不需要画布尺寸（比如硬编码绝对坐标）时可传 NULL，跳过写出参。
+///
+/// `vp_x / vp_y / vp_w / vp_h`：viewport（DComp visual / swap chain 在物理屏上的
+/// 位置和大小，物理像素）。语义跟 v0.6 一致。
+renderer_begin_frame(
+    h: *mut Renderer,
+    vp_x: f32, vp_y: f32, vp_w: f32, vp_h: f32,
+    out_canvas_w: *mut i32,    // v0.7 新增；NULL 允许
+    out_canvas_h: *mut i32,    // v0.7 新增；NULL 允许
+) -> RendererStatus
+```
+
+**破坏性变更说明**：v0.7 起所有 begin_frame 调用方（widget P/Invoke、未来的
+desktop-window FFI、社区 monitor）必须传 6 个参数（4 个 viewport + 2 个出参）。
+v0.6 调用方传 5 个参数会 stack misalignment。这是**故意破坏**——见 §8 兼容承诺。
+
+#### 2.6.5 host 调用约定
+
+**winit / Win32 host 推荐流程**（desktop-window 实施）：
+
+```rust
+// 创建：初始画布跟 winit 创建窗口的物理像素一致
+let physical = window.inner_size();
+let h = ffi.create(physical.width as i32, physical.height as i32)?;
+
+// 事件循环
+match event {
+    WindowEvent::Resized(new_size) => {
+        ffi.resize_canvas(new_size.width as i32, new_size.height as i32)?;
+    }
+    WindowEvent::RedrawRequested => {
+        let (cw, ch) = ffi.begin_frame(0.0, 0.0, win_w, win_h)?;
+        // 业务用 cw / ch 百分比布局
+        ffi.fill_rect(cw as f32 * 0.5 - 100.0, ch as f32 * 0.5 - 100.0, 200.0, 200.0, ...);
+        ffi.end_frame()?;
+    }
+}
+```
+
+**XAML / WinRT host 推荐流程**（widget 改造路径）：
+
+```csharp
+// SizeChanged 事件
+private void OnWidgetSizeChanged(object sender, SizeChangedEventArgs e) {
+    var dpi = ScreenInterop.GetDpiForWindow(...);
+    int physicalW = (int)(e.NewSize.Width * dpi / 96.0);
+    int physicalH = (int)(e.NewSize.Height * dpi / 96.0);
+    RendererPInvoke.renderer_resize_canvas(_handle, physicalW, physicalH);
+}
+```
+
+如果 host **不**调 resize_canvas，画布永远是 `renderer_create` 时的尺寸，
+DComp 自动按 visual.Size 拉伸——这就是 v0.6 widget 的行为，v0.7 对兼容这条路径。
 
 ## 3. Bitmap 资源系统
 
@@ -489,7 +646,7 @@ renderer_capture_close(h: *mut Renderer, capture: u32) -> RendererStatus
 
 ## 5. C# P/Invoke 层
 
-每个 ABI 在 `csharp-shell/Native/RendererPInvoke.cs` 加 `[DllImport]` 包装。Bitmap handle 在 C# 用 `struct BitmapHandle { public uint Value; }` 包一下，避免误传普通 uint。
+每个 ABI 在 `monitors/game-bar-widget/Native/RendererPInvoke.cs` 加 `[DllImport]` 包装。Bitmap handle 在 C# 用 `struct BitmapHandle { public uint Value; }` 包一下，避免误传普通 uint。
 
 ```csharp
 public readonly struct BitmapHandle : IEquatable<BitmapHandle>
@@ -604,12 +761,48 @@ public readonly struct CaptureHandle { public readonly uint Value; }
 | NV12 → BGRA 转换性能 | 视频卡顿 | 用 D2D `D2D1_NV12_PLANES_EFFECT` 或自写 PS shader |
 | 老 v0.6 业务代码与新 transform/clip 状态污染 | 老接口画面错位 | begin_frame 进入时强制 reset 所有状态（clip 栈清空、transform = viewport identity） |
 | 32+ 个新 ABI 导致 P/Invoke 表臃肿 | C# 端大量 boilerplate | 用 T4 / 源生成器统一生成（v0.8 可优化，v0.7 手写一遍） |
+| begin_frame 签名变更破坏 widget v0.6 P/Invoke | widget v0.6 到 v0.7 升级时直接 crash（stack misalignment） | 实施时 widget P/Invoke 必须跟 renderer 同 phase 升级；CI 加 ABI binary 兼容性检查（`cargo-public-api` / 手写 abi 版本号） |
+| host 在 begin/end_frame 之间调 resize_canvas | D2D bitmap target 还在 SetTarget 状态，重建会脏 | resize_canvas 进入时检测帧状态，返 FRAME_HELD（错误码 -6） |
+| 用户连续拖窗口产生 100+ WM_SIZE，每个都 ResizeBuffers | 拖动卡顿 | host 端做 debounce（连续 resize 合并到停下后那一次）；renderer 端 same-size short-circuit 减少不必要的 ResizeBuffers |
 
 ## 8. 与 v0.6 的兼容
 
-- 所有 v0.6 函数签名**字节级保留**，不改。老 C# 代码原样跑
-- 错误码 0..-7 保留含义不变；新错误码 -8 起
-- `begin_frame` 内部行为加一行：清空 clip 栈、reset transform 到 viewport translate。这是**新行为**但向前兼容（v0.6 业务从不 push clip / set transform，所以观察不到差异）
+**保留不变（字节级一致）**：
+
+- `renderer_create` / `renderer_destroy` / `renderer_resize` / `renderer_get_swapchain`
+- `renderer_set_log_callback` / `renderer_get_perf_stats` / `renderer_last_error_string`
+- `renderer_clear` / `renderer_fill_rect` / `renderer_draw_text` / `renderer_end_frame`
+- 错误码 0..-7 含义不变；新错误码 -8 起
+
+**破坏性变更（v0.7 起）**：
+
+- `renderer_begin_frame` 签名加 2 个出参（`out_canvas_w` / `out_canvas_h`）。所有调用方
+  必须更新，传 5 个参数会 stack misalignment 崩溃。这是项目前期对架构良好基础的
+  必要投入（决策 10.8）。
+
+  迁移方法：调用方原本的 5 参调用改为 6 参，新增的 2 个出参允许传 NULL（不需要
+  画布尺寸时跳过写出参；推荐 desktop-window 之类的新 monitor 都传非 NULL，
+  以便每帧拿当前画布尺寸做百分比布局）。
+
+**新加（v0.7 only）**：
+
+- `renderer_resize_canvas`（§2.6.3）—— host 在 WM_SIZE 触发，**不应每帧调**
+- 全部矢量图元 / bitmap / 视频 / 捕获 ABI（§2.3-2.5、§3、§4）
+
+**行为变更（向前兼容）**：
+
+- `begin_frame` 内部加一行：清空 clip 栈、reset transform 到 viewport translate。
+  这是新行为但向前兼容（v0.6 业务从不 push clip / set transform，所以观察不到差异）
+
+**widget 端迁移**（v0.7 实施 step）：
+
+widget 用的是 v0.6 P/Invoke。v0.7 实施时 widget 必须同步更新：
+
+1. `RendererPInvoke.cs` 的 `renderer_begin_frame` 签名改 6 参（加 `out IntPtr canvasW, out IntPtr canvasH` 或 `int*` 双指针）
+2. 调用点改成接收画布尺寸（如果 widget 业务画图改百分比布局 → 用之；如果保持
+   v0.6 写死坐标 → 传 IntPtr.Zero / nullptr 跳过出参）
+3. 加 `renderer_resize_canvas` 的 P/Invoke 包装（widget 是否真的调它取决于
+   widget 是否要"画布跟随物理像素"——见 desktop-window/SPEC §13）
 
 ## 9. 文档与 changelog
 
@@ -736,5 +929,48 @@ impl Painter {
 ```
 phase 完成 → cargo test --release（必须全绿）→ git commit -m "feat(painter): phase N - <主题>" → git tag v0.7-phaseN
 ```
+
+### 10.8 画布管理：不引入 mode 枚举，host 调用模式即策略
+
+**决策**：v0.7 加 `renderer_resize_canvas` + `renderer_begin_frame` 出参，
+**不**加 `canvas_mode` 枚举（不区分 FIXED / ADAPTIVE / STEPPED 等内部状态）。
+
+**调研背景**（2026-05）：调研 Bevy / wgpu / OBS Studio / Direct2D 官方文档：
+
+- **Bevy**：`OrthographicProjection::ScalingMode` 6 种（`WindowSize` / `Fixed` /
+  `FixedVertical` / `FixedHorizontal` / `AutoMin` / `AutoMax`）—— 但放在 Camera
+  层，wgpu 层完全不管，wgpu Surface configure 永远收物理像素。
+- **OBS**：分 Base Resolution（编辑画布）vs Output Resolution（编码输出）两层。
+  我们项目是 sink（直接上屏，无编码），不需要这层抽象。
+- **Direct2D 官方**（[Walbourn / MS Docs](https://walbourn.github.io/care-and-feeding-of-modern-swapchains/)）：明确警告**不要每帧 ResizeBuffers**，
+  应在 WM_SIZE 响应中调（约 100us~1ms 量级，per-frame 有显著性能损失）。
+
+**结论**：
+
+1. mode 枚举 = 内核状态。但 host 想要的所有行为（画布跟随 / 画布固定 / 用户面板
+   选档位 / 长宽比 letterbox）都可以通过「在某个事件里调或不调 resize_canvas」实现。
+   mode 枚举是多余的状态。
+2. ScalingMode（FixedVertical 等）是**业务策略**，应在 host 业务代码里实现
+   （用 `set_transform` + 缩放矩阵），不是 ABI 责任。把 ScalingMode 塞 ABI
+   会复刻 Bevy 的复杂度但拿不到 Bevy 的好处。
+3. 「每帧自动检测 viewport 变化 + 内部 resize」违反 Microsoft 官方推荐。
+   显式 `resize_canvas(WM_SIZE)` 才是对的。
+
+**业务侧 ScalingMode 实现示范**（如果业务需要 FixedVertical 720 等价行为）：
+
+```rust
+let (cw, ch) = ffi.begin_frame(0.0, 0.0, win_w, win_h, ...)?;
+let logical_h = 720.0;
+let scale = ch as f32 / logical_h;
+ffi.set_transform(scale, 0.0, 0.0, scale, 0.0, 0.0);
+let logical_w = cw as f32 / scale;
+ffi.fill_rect(logical_w * 0.5 - 100.0, 360.0 - 100.0, 200.0, 200.0, ...); // 永远在 720 高的中央
+```
+
+`set_transform` 已经在 §2.4 提供，业务自由组合。
+
+**未来扩展位**：如果 v0.8+ 真的发现需要 mode 枚举（比如内核要做 GPU 负载感知
+自动降分辨率），那时再加 `renderer_create_ex(canvas_w, canvas_h, mode_flags)`，
+flags 字段 0 = 当前 v0.7 行为。现在不预留，避免过度设计。
 
 任意 phase 测试不绿 → 不 commit / 不 tag，先修。

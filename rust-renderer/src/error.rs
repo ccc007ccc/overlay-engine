@@ -5,9 +5,11 @@
 //! 通过日志回调拿到详细文本。
 
 use crate::ffi::{
-    RendererStatus, RENDERER_ERR_DEVICE_INIT, RENDERER_ERR_FRAME_ACQUIRE,
-    RENDERER_ERR_FRAME_HELD, RENDERER_ERR_INVALID_PARAM, RENDERER_ERR_SWAPCHAIN_INIT,
-    RENDERER_ERR_THREAD_INIT,
+    RendererStatus, RENDERER_ERR_CANVAS_RESIZE_FAIL, RENDERER_ERR_DECODE_FAIL,
+    RENDERER_ERR_DEVICE_INIT, RENDERER_ERR_FRAME_ACQUIRE, RENDERER_ERR_FRAME_HELD,
+    RENDERER_ERR_INVALID_PARAM, RENDERER_ERR_IO, RENDERER_ERR_RESOURCE_LIMIT,
+    RENDERER_ERR_RESOURCE_NOT_FOUND, RENDERER_ERR_SWAPCHAIN_INIT, RENDERER_ERR_THREAD_INIT,
+    RENDERER_ERR_UNSUPPORTED_FORMAT,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -31,8 +33,11 @@ pub(crate) enum RendererError {
     #[error("render thread init failed: {0}")]
     ThreadInit(String),
 
-    /// 调 `acquire_frame` 时上一帧还没 `release` —— 协议错误。
-    #[error("frame still held by previous acquire (must release_frame first)")]
+    /// 命令式状态机违例：业务在 `begin_frame` / `end_frame` 之间调用了不允许同帧
+    /// 进行的操作（典型场景：v0.7 `resize_canvas` 要求帧外调用，spec §2.6.3）。
+    /// 历史名称沿用 V1 pull-driven 时期（acquire_frame / release_frame 协议错误）；
+    /// 错误码 `RENDERER_ERR_FRAME_HELD`(-6) 不变。
+    #[error("frame still held: operation not allowed between begin_frame and end_frame")]
     FrameStillHeld,
 
     /// 渲染或 Map staging 失败。V2 路径下 acquire 不会构造它（acquire 内部只可能
@@ -41,6 +46,35 @@ pub(crate) enum RendererError {
     #[allow(dead_code)]
     #[error("frame acquire/map failed: {0}")]
     FrameAcquire(#[source] windows::core::Error),
+
+    // ---------- v0.7 phase 2 资源系统 ----------
+    /// Bitmap / Video / Capture handle 找不到（已 destroy 或从未存在）。
+    /// 包含 ABA 失败：handle 的 generation 与 slot 当前 generation 不匹配。
+    #[error("resource handle not found or expired")]
+    ResourceNotFound,
+
+    /// Slot table 满（默认 BITMAP_SLOT_CAPACITY = 1024）。
+    #[error("resource slot table is full")]
+    ResourceLimit,
+
+    /// 图片 / 视频 / 纹理解码失败。WIC 返非零 HRESULT，或字节流不识别。
+    #[error("decode failed: {0}")]
+    DecodeFail(#[source] windows::core::Error),
+
+    /// 文件 IO 失败（路径不存在、权限不足、读写错误）。
+    #[error("io failed: {0}")]
+    Io(#[source] std::io::Error),
+
+    /// 编码格式不支持（path opcode 0x06+ 等保留区间，或未来 NV12 但当前 BGRA8 only 等）。
+    #[error("unsupported format: {0}")]
+    UnsupportedFormat(&'static str),
+
+    /// `renderer_resize` 时 ResizeBuffers / 重建 D2D bitmap render target 失败（含 device-lost）。
+    /// v0.7 spec §2.6 占位 —— 当前 begin_frame 内部仍走自动 resize 路径，不主动构造此变体；
+    /// 留给后续 phase 做 resize ABI 行为升级时使用。
+    #[allow(dead_code)]
+    #[error("canvas resize failed: {0}")]
+    CanvasResizeFail(#[source] windows::core::Error),
 }
 
 impl RendererError {
@@ -53,6 +87,12 @@ impl RendererError {
             Self::ThreadInit(_) => RENDERER_ERR_THREAD_INIT,
             Self::FrameStillHeld => RENDERER_ERR_FRAME_HELD,
             Self::FrameAcquire(_) => RENDERER_ERR_FRAME_ACQUIRE,
+            Self::ResourceNotFound => RENDERER_ERR_RESOURCE_NOT_FOUND,
+            Self::ResourceLimit => RENDERER_ERR_RESOURCE_LIMIT,
+            Self::DecodeFail(_) => RENDERER_ERR_DECODE_FAIL,
+            Self::Io(_) => RENDERER_ERR_IO,
+            Self::UnsupportedFormat(_) => RENDERER_ERR_UNSUPPORTED_FORMAT,
+            Self::CanvasResizeFail(_) => RENDERER_ERR_CANVAS_RESIZE_FAIL,
         }
     }
 }
