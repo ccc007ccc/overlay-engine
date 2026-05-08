@@ -626,6 +626,174 @@ impl PinnedReadbackBackend {
         Ok(())
     }
 
+    // ===== v0.7 phase 5 path + 渐变（spec §2.3.4 / §2.5） =====
+
+    /// 校验 path byte 流：opcode 落入 0x01..=0x05，每个 opcode 后参数字节足够。
+    /// 0x06+ → UnsupportedFormat（与 spec §2.3.4 决策 10.1 一致：不静默丢弃）。
+    /// 字节不足 / 截断 → InvalidParam。
+    /// 校验在 swapchain 层做，painter 层假设 path 已合法 —— 让错误码能干净返到 FFI。
+    fn validate_path_bytes(path: &[u8]) -> RendererResult<()> {
+        let mut i = 0usize;
+        while i < path.len() {
+            let op = path[i];
+            i += 1;
+            // 每个 opcode 后跟随的字节数（spec §2.3.4）：
+            //   0x01 MOVE_TO    8  bytes (x, y)
+            //   0x02 LINE_TO    8  bytes (x, y)
+            //   0x03 BEZIER     24 bytes (x1, y1, x2, y2, x3, y3)
+            //   0x04 ARC        22 bytes (x, y, rx, ry, rotation, large_arc, sweep)
+            //   0x05 CLOSE      0
+            let need: usize = match op {
+                crate::renderer::painter::PATH_OP_MOVE_TO => 8,
+                crate::renderer::painter::PATH_OP_LINE_TO => 8,
+                crate::renderer::painter::PATH_OP_BEZIER => 24,
+                crate::renderer::painter::PATH_OP_ARC => 22,
+                crate::renderer::painter::PATH_OP_CLOSE => 0,
+                _ => {
+                    return Err(RendererError::UnsupportedFormat(
+                        "path opcode reserved for v0.8+ (>= 0x06)",
+                    ));
+                }
+            };
+            if i + need > path.len() {
+                return Err(RendererError::InvalidParam(
+                    "path byte stream truncated mid-opcode",
+                ));
+            }
+            i += need;
+        }
+        Ok(())
+    }
+
+    /// stops 数组校验（spec §2.5）：长度 = 5 × N，N >= 2，offset ∈ [0, 1] 升序。
+    fn validate_gradient_stops(stops: &[f32]) -> RendererResult<()> {
+        if stops.len() < 10 || stops.len() % 5 != 0 {
+            return Err(RendererError::InvalidParam(
+                "gradient stops require >= 2 entries of [offset, r, g, b, a]",
+            ));
+        }
+        let n = stops.len() / 5;
+        let mut prev = -1.0f32;
+        for i in 0..n {
+            let o = stops[i * 5];
+            if !(0.0..=1.0).contains(&o) || o < prev {
+                return Err(RendererError::InvalidParam(
+                    "gradient stop offset must be in [0,1] and non-decreasing",
+                ));
+            }
+            prev = o;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cmd_fill_path(
+        &mut self,
+        path: &[u8],
+        color: [f32; 4],
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_fill_path called outside begin_frame/end_frame",
+            ));
+        }
+        Self::validate_path_bytes(path)?;
+        self.make_painter().execute(&DrawCmd::FillPath {
+            path: path.to_vec(),
+            rgba: color,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn cmd_stroke_path(
+        &mut self,
+        path: &[u8],
+        stroke_width: f32,
+        color: [f32; 4],
+        dash_style: i32,
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_stroke_path called outside begin_frame/end_frame",
+            ));
+        }
+        Self::validate_path_bytes(path)?;
+        self.make_painter().execute(&DrawCmd::StrokePath {
+            path: path.to_vec(),
+            stroke_width,
+            rgba: color,
+            dash_style,
+        });
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_fill_rect_gradient_linear(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        sx: f32,
+        sy: f32,
+        ex: f32,
+        ey: f32,
+        stops: &[f32],
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_fill_rect_gradient_linear called outside begin_frame/end_frame",
+            ));
+        }
+        Self::validate_gradient_stops(stops)?;
+        self.make_painter()
+            .execute(&DrawCmd::FillRectGradientLinear {
+                x,
+                y,
+                w,
+                h,
+                start_x: sx,
+                start_y: sy,
+                end_x: ex,
+                end_y: ey,
+                stops: stops.to_vec(),
+            });
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_fill_rect_gradient_radial(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        stops: &[f32],
+    ) -> RendererResult<()> {
+        if !self.cmd_drawing {
+            return Err(RendererError::InvalidParam(
+                "cmd_fill_rect_gradient_radial called outside begin_frame/end_frame",
+            ));
+        }
+        Self::validate_gradient_stops(stops)?;
+        self.make_painter()
+            .execute(&DrawCmd::FillRectGradientRadial {
+                x,
+                y,
+                w,
+                h,
+                center_x: cx,
+                center_y: cy,
+                radius_x: rx,
+                radius_y: ry,
+                stops: stops.to_vec(),
+            });
+        Ok(())
+    }
+
     /// v0.6 DComp 入口：提交一帧 → EndDraw + Present(0, 0)。
     ///
     /// Present 触发 DComp 拉新内容（异步、跨线程安全）；不返 mapped pointer。

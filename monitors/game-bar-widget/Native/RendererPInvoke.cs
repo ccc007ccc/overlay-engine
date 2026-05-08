@@ -527,6 +527,130 @@ namespace OverlayWidget.Native
             float opacity,
             int interpMode);
 
+        // ===== v0.7 phase 5 path + 渐变（spec §2.3.4 / §2.5） =====
+
+        /// <summary>
+        /// path opcode（与 Rust 端 painter 常量一致，spec §2.3.4）。
+        /// 0x06+ 为 v0.8+ 保留，调用 fill_path/stroke_path 时遇到立即返 UNSUPPORTED_FORMAT。
+        /// </summary>
+        public const byte PATH_OP_MOVE_TO = 0x01;
+        public const byte PATH_OP_LINE_TO = 0x02;
+        public const byte PATH_OP_BEZIER = 0x03;
+        public const byte PATH_OP_ARC = 0x04;
+        public const byte PATH_OP_CLOSE = 0x05;
+
+        /// <summary>
+        /// 填充任意路径。path_bytes = opcode 字节流（参见 PATH_OP_*）。
+        /// 0x06+ 返 UNSUPPORTED_FORMAT；字节截断返 INVALID_PARAM。必须在帧内。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_fill_path(
+            IntPtr handle,
+            IntPtr pathBytes,
+            int pathLen,
+            float r, float g, float b, float a);
+
+        /// <summary>描边任意路径。dash_style 沿用 stroke_rect 系列：0=solid, 1=dash, 2=dot, 3=dash-dot。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_stroke_path(
+            IntPtr handle,
+            IntPtr pathBytes,
+            int pathLen,
+            float strokeWidth,
+            float r, float g, float b, float a,
+            int dashStyle);
+
+        /// <summary>
+        /// 矩形 + 线性渐变。stops = [offset, r, g, b, a, ...]，长度 5×stopCount。
+        /// stopCount &gt;= 2，offset 升序 ∈ [0,1]，premultiplied alpha。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_fill_rect_gradient_linear(
+            IntPtr handle,
+            float x, float y, float w, float h,
+            float startX, float startY,
+            float endX, float endY,
+            IntPtr stops,
+            int stopCount);
+
+        /// <summary>矩形 + 径向渐变。stops 同 linear。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_fill_rect_gradient_radial(
+            IntPtr handle,
+            float x, float y, float w, float h,
+            float centerX, float centerY,
+            float radiusX, float radiusY,
+            IntPtr stops,
+            int stopCount);
+
+        /// <summary>FillPath 便利包装：自动 fix path 字节数组。</summary>
+        public static int FillPath(IntPtr handle, byte[] path, float r, float g, float b, float a)
+        {
+            if (path == null || path.Length == 0) return RENDERER_ERR_INVALID_PARAM;
+            unsafe
+            {
+                fixed (byte* p = path)
+                {
+                    return renderer_fill_path(handle, (IntPtr)p, path.Length, r, g, b, a);
+                }
+            }
+        }
+
+        /// <summary>StrokePath 便利包装。</summary>
+        public static int StrokePath(IntPtr handle, byte[] path, float strokeWidth,
+            float r, float g, float b, float a, int dashStyle)
+        {
+            if (path == null || path.Length == 0) return RENDERER_ERR_INVALID_PARAM;
+            unsafe
+            {
+                fixed (byte* p = path)
+                {
+                    return renderer_stroke_path(handle, (IntPtr)p, path.Length, strokeWidth,
+                        r, g, b, a, dashStyle);
+                }
+            }
+        }
+
+        /// <summary>FillRectGradientLinear 便利包装。stops = [offset, r, g, b, a, ...] 平铺数组。</summary>
+        public static int FillRectGradientLinear(IntPtr handle,
+            float x, float y, float w, float h,
+            float startX, float startY, float endX, float endY,
+            float[] stops)
+        {
+            if (stops == null || stops.Length < 10 || stops.Length % 5 != 0)
+                return RENDERER_ERR_INVALID_PARAM;
+            int stopCount = stops.Length / 5;
+            unsafe
+            {
+                fixed (float* p = stops)
+                {
+                    return renderer_fill_rect_gradient_linear(
+                        handle, x, y, w, h, startX, startY, endX, endY,
+                        (IntPtr)p, stopCount);
+                }
+            }
+        }
+
+        /// <summary>FillRectGradientRadial 便利包装。</summary>
+        public static int FillRectGradientRadial(IntPtr handle,
+            float x, float y, float w, float h,
+            float centerX, float centerY, float radiusX, float radiusY,
+            float[] stops)
+        {
+            if (stops == null || stops.Length < 10 || stops.Length % 5 != 0)
+                return RENDERER_ERR_INVALID_PARAM;
+            int stopCount = stops.Length / 5;
+            unsafe
+            {
+                fixed (float* p = stops)
+                {
+                    return renderer_fill_rect_gradient_radial(
+                        handle, x, y, w, h, centerX, centerY, radiusX, radiusY,
+                        (IntPtr)p, stopCount);
+                }
+            }
+        }
+
         // ===== v0.7 phase 3 video（spec §4.1） =====
 
         /// <summary>

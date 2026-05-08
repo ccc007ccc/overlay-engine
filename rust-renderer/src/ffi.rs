@@ -367,6 +367,60 @@ impl Renderer {
         )
     }
 
+    // ===== v0.7 phase 5 path + 渐变 =====
+
+    pub(crate) fn cmd_fill_path(&self, path: &[u8], color: [f32; 4]) -> RendererResult<()> {
+        self.inner.lock().cmd_fill_path(path, color)
+    }
+
+    pub(crate) fn cmd_stroke_path(
+        &self,
+        path: &[u8],
+        stroke_width: f32,
+        color: [f32; 4],
+        dash_style: i32,
+    ) -> RendererResult<()> {
+        self.inner
+            .lock()
+            .cmd_stroke_path(path, stroke_width, color, dash_style)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_fill_rect_gradient_linear(
+        &self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        sx: f32,
+        sy: f32,
+        ex: f32,
+        ey: f32,
+        stops: &[f32],
+    ) -> RendererResult<()> {
+        self.inner
+            .lock()
+            .cmd_fill_rect_gradient_linear(x, y, w, h, sx, sy, ex, ey, stops)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_fill_rect_gradient_radial(
+        &self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        stops: &[f32],
+    ) -> RendererResult<()> {
+        self.inner
+            .lock()
+            .cmd_fill_rect_gradient_radial(x, y, w, h, cx, cy, rx, ry, stops)
+    }
+
     /// v0.6 DComp end_frame：内部 EndDraw + Present(0, 0)。无 out 参数。
     pub(crate) fn end_frame(&self) -> RendererResult<()> {
         self.inner.lock().end_frame().map(|_| ())

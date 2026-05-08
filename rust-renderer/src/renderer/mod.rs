@@ -330,6 +330,56 @@ impl RendererState {
         )
     }
 
+    // ===== v0.7 phase 5 path + 渐变（薄转发） =====
+
+    pub(crate) fn cmd_fill_path(&mut self, path: &[u8], color: [f32; 4]) -> RendererResult<()> {
+        self.surface.cmd_fill_path(path, color)
+    }
+
+    pub(crate) fn cmd_stroke_path(
+        &mut self,
+        path: &[u8],
+        stroke_width: f32,
+        color: [f32; 4],
+        dash_style: i32,
+    ) -> RendererResult<()> {
+        self.surface.cmd_stroke_path(path, stroke_width, color, dash_style)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_fill_rect_gradient_linear(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        sx: f32,
+        sy: f32,
+        ex: f32,
+        ey: f32,
+        stops: &[f32],
+    ) -> RendererResult<()> {
+        self.surface
+            .cmd_fill_rect_gradient_linear(x, y, w, h, sx, sy, ex, ey, stops)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn cmd_fill_rect_gradient_radial(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        stops: &[f32],
+    ) -> RendererResult<()> {
+        self.surface
+            .cmd_fill_rect_gradient_radial(x, y, w, h, cx, cy, rx, ry, stops)
+    }
+
     // ===== v0.7 phase 3 video（spec §4.1） =====
 
     /// 打开本地视频文件：先 painter.create_texture(BGRA8) 拿空 bitmap，

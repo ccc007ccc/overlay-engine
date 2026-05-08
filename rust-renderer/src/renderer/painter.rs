@@ -54,19 +54,24 @@ use std::mem::ManuallyDrop;
 use windows::core::{w, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
-    D2D_RECT_U, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
+    D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F, D2D_RECT_U, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    ID2D1GradientStopCollection, ID2D1LinearGradientBrush,
+    ID2D1RadialGradientBrush, ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ARC_SEGMENT,
+    D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DASH_DOT, D2D1_DASH_STYLE_DOT,
-    D2D1_DASH_STYLE_SOLID, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_ELLIPSE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-    D2D1_LINE_JOIN_MITER, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
-    D2D1_STROKE_TRANSFORM_TYPE_NORMAL,
+    D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DASH_DOT,
+    D2D1_DASH_STYLE_DOT, D2D1_DASH_STYLE_SOLID, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_OPTIONS,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_LINE_JOIN_MITER, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES1, D2D1_STROKE_TRANSFORM_TYPE_NORMAL,
+    D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
 };
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Graphics::DirectWrite::{
@@ -128,6 +133,25 @@ pub const TEXTURE_FORMAT_NV12: i32 = 2;
 pub const INTERP_NEAREST: i32 = 0;
 #[allow(dead_code)]
 pub const INTERP_LINEAR: i32 = 1;
+
+// ============================================================
+// v0.7 phase 5 path opcode 常量（spec §2.3.4）
+// ============================================================
+//
+// Byte 流编码：业务一次性给一个 byte 流（Vec<u8>），Rust 端解码喂给 ID2D1PathGeometry。
+// 0x06+ 全部 reserved（决策 10.1），遇到立刻报 UnsupportedFormat 不静默崩溃 —— 让
+// 未来加新 opcode 时老二进制有明确报错。
+
+#[allow(dead_code)]
+pub const PATH_OP_MOVE_TO: u8 = 0x01;
+#[allow(dead_code)]
+pub const PATH_OP_LINE_TO: u8 = 0x02;
+#[allow(dead_code)]
+pub const PATH_OP_BEZIER: u8 = 0x03;
+#[allow(dead_code)]
+pub const PATH_OP_ARC: u8 = 0x04;
+#[allow(dead_code)]
+pub const PATH_OP_CLOSE: u8 = 0x05;
 
 // ============================================================
 // v0.7 phase 2 bitmap 资源类型
@@ -807,6 +831,45 @@ pub enum DrawCmd {
         opacity: f32,
         interp_mode: i32,
     },
+
+    // ===== v0.7 phase 5 path + 渐变（spec §2.3.4 / §2.5） =====
+
+    /// 填充任意路径（path opcode byte 流）。0x06+ → UnsupportedFormat。
+    FillPath {
+        path: Vec<u8>,
+        rgba: [f32; 4],
+    },
+    /// 描边任意路径（同上）。dash_style 沿用 stroke_rect 系列。
+    StrokePath {
+        path: Vec<u8>,
+        stroke_width: f32,
+        rgba: [f32; 4],
+        dash_style: i32,
+    },
+    /// 矩形 + 线性渐变。stops: [offset, r, g, b, a, ...]。premultiplied alpha。
+    FillRectGradientLinear {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+        stops: Vec<f32>,
+    },
+    /// 矩形 + 径向渐变。同上但中心 + 椭圆半径。
+    FillRectGradientRadial {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        center_x: f32,
+        center_y: f32,
+        radius_x: f32,
+        radius_y: f32,
+        stops: Vec<f32>,
+    },
 }
 
 impl<'a> Painter<'a> {
@@ -911,6 +974,39 @@ impl<'a> Painter<'a> {
                 *dst_h,
                 *opacity,
                 *interp_mode,
+            ),
+            DrawCmd::FillPath { path, rgba } => self.do_fill_path(path, *rgba),
+            DrawCmd::StrokePath {
+                path,
+                stroke_width,
+                rgba,
+                dash_style,
+            } => self.do_stroke_path(path, *stroke_width, *rgba, *dash_style),
+            DrawCmd::FillRectGradientLinear {
+                x,
+                y,
+                w,
+                h,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                stops,
+            } => self.do_fill_rect_gradient_linear(
+                *x, *y, *w, *h, *start_x, *start_y, *end_x, *end_y, stops,
+            ),
+            DrawCmd::FillRectGradientRadial {
+                x,
+                y,
+                w,
+                h,
+                center_x,
+                center_y,
+                radius_x,
+                radius_y,
+                stops,
+            } => self.do_fill_rect_gradient_radial(
+                *x, *y, *w, *h, *center_x, *center_y, *radius_x, *radius_y, stops,
             ),
         }
     }
@@ -1247,6 +1343,349 @@ impl<'a> Painter<'a> {
                 src_rect_opt.as_ref().map(|r| r as *const _),
                 None, // perspective transform
             );
+        }
+    }
+
+    // ============================================================
+    // v0.7 phase 5：path + 渐变 实现
+    // ============================================================
+
+    /// 解码 path byte 流 → ID2D1PathGeometry。BeginFigure 用 figure_begin（FILLED/HOLLOW），
+    /// figure 由 0x05 CLOSE 触发 EndFigure(CLOSED)，否则 path 末尾自动 EndFigure(OPEN)。
+    ///
+    /// 失败处理：path 解码错误 / 0x06+ 不在这里报 —— 调用前由 swapchain 层
+    /// `validate_path_bytes` 校验。这里假设 path 已合法；遇到意外仍尽量画完不 panic。
+    fn build_path_geometry(
+        &self,
+        path: &[u8],
+        figure_begin: windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN,
+    ) -> Option<windows::Win32::Graphics::Direct2D::ID2D1PathGeometry1> {
+        let geom = unsafe {
+            match self.engine.factory.CreatePathGeometry() {
+                Ok(g) => g,
+                Err(e) => {
+                    crate::log::emit(4, &format!("CreatePathGeometry failed: {}", e));
+                    return None;
+                }
+            }
+        };
+        let sink: windows::Win32::Graphics::Direct2D::ID2D1GeometrySink = unsafe {
+            match geom.Open() {
+                Ok(s) => s,
+                Err(e) => {
+                    crate::log::emit(4, &format!("PathGeometry.Open failed: {}", e));
+                    return None;
+                }
+            }
+        };
+
+        // 解码状态机：
+        //   in_figure = false：必须先 MOVE_TO 才能进 figure
+        //   in_figure = true ：可以 LINE_TO / BEZIER / ARC / CLOSE / 新的 MOVE_TO（隐式 EndFigure(OPEN)）
+        let mut i = 0usize;
+        let mut in_figure = false;
+        let mut current = D2D_POINT_2F { x: 0.0, y: 0.0 };
+
+        // 小工具：从 byte 流读 N 个 f32（小端，与 host 一致）
+        let read_f32 = |bytes: &[u8], off: usize| -> f32 {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&bytes[off..off + 4]);
+            f32::from_le_bytes(buf)
+        };
+
+        while i < path.len() {
+            let op = path[i];
+            i += 1;
+            match op {
+                PATH_OP_MOVE_TO => {
+                    // 先关闭旧 figure
+                    if in_figure {
+                        unsafe { sink.EndFigure(D2D1_FIGURE_END_OPEN) };
+                    }
+                    let x = read_f32(path, i);
+                    let y = read_f32(path, i + 4);
+                    i += 8;
+                    current = D2D_POINT_2F { x, y };
+                    unsafe { sink.BeginFigure(current, figure_begin) };
+                    in_figure = true;
+                }
+                PATH_OP_LINE_TO => {
+                    let x = read_f32(path, i);
+                    let y = read_f32(path, i + 4);
+                    i += 8;
+                    if in_figure {
+                        unsafe { sink.AddLine(D2D_POINT_2F { x, y }) };
+                        current = D2D_POINT_2F { x, y };
+                    }
+                }
+                PATH_OP_BEZIER => {
+                    let x1 = read_f32(path, i);
+                    let y1 = read_f32(path, i + 4);
+                    let x2 = read_f32(path, i + 8);
+                    let y2 = read_f32(path, i + 12);
+                    let x3 = read_f32(path, i + 16);
+                    let y3 = read_f32(path, i + 20);
+                    i += 24;
+                    if in_figure {
+                        let seg =
+                            windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                                point1: D2D_POINT_2F { x: x1, y: y1 },
+                                point2: D2D_POINT_2F { x: x2, y: y2 },
+                                point3: D2D_POINT_2F { x: x3, y: y3 },
+                            };
+                        unsafe { sink.AddBezier(&seg as *const _) };
+                        current = D2D_POINT_2F { x: x3, y: y3 };
+                    }
+                }
+                PATH_OP_ARC => {
+                    let x = read_f32(path, i);
+                    let y = read_f32(path, i + 4);
+                    let rx = read_f32(path, i + 8);
+                    let ry = read_f32(path, i + 12);
+                    let rotation = read_f32(path, i + 16);
+                    let large_arc = path[i + 20];
+                    let sweep = path[i + 21];
+                    i += 22;
+                    if in_figure {
+                        let seg = D2D1_ARC_SEGMENT {
+                            point: D2D_POINT_2F { x, y },
+                            size: windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_F {
+                                width: rx,
+                                height: ry,
+                            },
+                            rotationAngle: rotation,
+                            sweepDirection: if sweep != 0 {
+                                D2D1_SWEEP_DIRECTION_CLOCKWISE
+                            } else {
+                                D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE
+                            },
+                            arcSize: if large_arc != 0 {
+                                D2D1_ARC_SIZE_LARGE
+                            } else {
+                                D2D1_ARC_SIZE_SMALL
+                            },
+                        };
+                        unsafe { sink.AddArc(&seg as *const _) };
+                        current = D2D_POINT_2F { x, y };
+                    }
+                }
+                PATH_OP_CLOSE => {
+                    if in_figure {
+                        unsafe { sink.EndFigure(D2D1_FIGURE_END_CLOSED) };
+                        in_figure = false;
+                    }
+                }
+                _ => {
+                    // 已被 validate_path_bytes 过滤，理论走不到 —— 防御加 log。
+                    crate::log::emit(4, &format!("path: unknown opcode 0x{:02X}", op));
+                    break;
+                }
+            }
+        }
+        // path 末尾还在 figure 内 → EndFigure(OPEN)
+        if in_figure {
+            unsafe { sink.EndFigure(D2D1_FIGURE_END_OPEN) };
+        }
+        unsafe {
+            if let Err(e) = sink.Close() {
+                crate::log::emit(4, &format!("GeometrySink.Close failed: {}", e));
+                return None;
+            }
+        }
+        let _ = current; // 未来可能加 quad bezier 时用到
+        Some(geom)
+    }
+
+    fn do_fill_path(&mut self, path: &[u8], color: [f32; 4]) {
+        let geom = match self.build_path_geometry(path, D2D1_FIGURE_BEGIN_FILLED) {
+            Some(g) => g,
+            None => return,
+        };
+        let brush = match self.engine.get_brush(color) {
+            Some(b) => b,
+            None => return,
+        };
+        // FillGeometry: brush 必填（windows-rs IntoParam 自动从 SolidColorBrush
+        // cast 到 ID2D1Brush），opacity_brush None。ID2D1RenderTarget 版返 ()。
+        unsafe {
+            self.engine.dc.FillGeometry(&geom, &brush, None);
+        }
+    }
+
+    fn do_stroke_path(
+        &mut self,
+        path: &[u8],
+        stroke_width: f32,
+        color: [f32; 4],
+        dash_style: i32,
+    ) {
+        let geom = match self.build_path_geometry(path, D2D1_FIGURE_BEGIN_HOLLOW) {
+            Some(g) => g,
+            None => return,
+        };
+        let brush = match self.engine.get_brush(color) {
+            Some(b) => b,
+            None => return,
+        };
+        let style = self.engine.get_stroke_style(dash_style);
+        unsafe {
+            self.engine
+                .dc
+                .DrawGeometry(&geom, &brush, stroke_width, style.as_ref());
+        }
+    }
+
+    /// 把 [offset, r, g, b, a, ...] 平铺数组转 D2D1_GRADIENT_STOP 数组。
+    /// 返 None 表示 stops 不合法（数量、offset 范围）—— 调用方 swapchain 层会先校验，
+    /// 这里再防一道。
+    fn build_gradient_stops(&self, stops: &[f32]) -> Option<Vec<D2D1_GRADIENT_STOP>> {
+        if stops.len() < 10 || stops.len() % 5 != 0 {
+            return None;
+        }
+        let n = stops.len() / 5;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let o = i * 5;
+            let offset = stops[o].clamp(0.0, 1.0);
+            let r = stops[o + 1];
+            let g = stops[o + 2];
+            let b = stops[o + 3];
+            let a = stops[o + 4];
+            out.push(D2D1_GRADIENT_STOP {
+                position: offset,
+                color: D2D1_COLOR_F { r, g, b, a },
+            });
+        }
+        Some(out)
+    }
+
+    fn build_gradient_collection(
+        &self,
+        stops: &[f32],
+    ) -> Option<ID2D1GradientStopCollection> {
+        let arr = self.build_gradient_stops(stops)?;
+        // dc 是 ID2D1DeviceContext。其上的 CreateGradientStopCollection 是 6 参版返
+        // ID2D1GradientStopCollection1（子接口）。windows-rs Interface trait 的
+        // .cast() 转回基础接口供后续 brush API 使用。
+        unsafe {
+            use windows::Win32::Graphics::Direct2D::{
+                D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                D2D1_COLOR_SPACE_SRGB, D2D1_EXTEND_MODE_CLAMP,
+            };
+            let coll1 = match self.engine.dc.CreateGradientStopCollection(
+                &arr,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                D2D1_EXTEND_MODE_CLAMP,
+                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    crate::log::emit(4, &format!("CreateGradientStopCollection failed: {}", e));
+                    return None;
+                }
+            };
+            // ID2D1GradientStopCollection1 → ID2D1GradientStopCollection (父接口)
+            match coll1.cast::<ID2D1GradientStopCollection>() {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    crate::log::emit(4, &format!("cast collection1→collection: {}", e));
+                    None
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn do_fill_rect_gradient_linear(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        sx: f32,
+        sy: f32,
+        ex: f32,
+        ey: f32,
+        stops: &[f32],
+    ) {
+        let coll = match self.build_gradient_collection(stops) {
+            Some(c) => c,
+            None => return,
+        };
+        let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+            startPoint: D2D_POINT_2F { x: sx, y: sy },
+            endPoint: D2D_POINT_2F { x: ex, y: ey },
+        };
+        let brush: ID2D1LinearGradientBrush = unsafe {
+            match self
+                .engine
+                .dc
+                .CreateLinearGradientBrush(&props, None, &coll)
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    crate::log::emit(4, &format!("CreateLinearGradientBrush failed: {}", e));
+                    return;
+                }
+            }
+        };
+        let rect = D2D_RECT_F {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + h,
+        };
+        unsafe {
+            self.engine.dc.FillRectangle(&rect, &brush);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn do_fill_rect_gradient_radial(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        stops: &[f32],
+    ) {
+        let coll = match self.build_gradient_collection(stops) {
+            Some(c) => c,
+            None => return,
+        };
+        let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+            center: D2D_POINT_2F { x: cx, y: cy },
+            gradientOriginOffset: D2D_POINT_2F { x: 0.0, y: 0.0 },
+            radiusX: rx,
+            radiusY: ry,
+        };
+        let brush: ID2D1RadialGradientBrush = unsafe {
+            match self
+                .engine
+                .dc
+                .CreateRadialGradientBrush(&props, None, &coll)
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    crate::log::emit(4, &format!("CreateRadialGradientBrush failed: {}", e));
+                    return;
+                }
+            }
+        };
+        let rect = D2D_RECT_F {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + h,
+        };
+        unsafe {
+            self.engine.dc.FillRectangle(&rect, &brush);
         }
     }
 }

@@ -840,6 +840,129 @@ pub unsafe extern "system" fn renderer_draw_bitmap(
 }
 
 // =====================================================================
+// v0.7 phase 5 path + 渐变（spec §2.3.4 / §2.5）
+// =====================================================================
+
+/// 填充任意路径。path_bytes 是 opcode 字节流（0x01-0x05，v0.7 支持）。
+/// 0x06+ opcode → UNSUPPORTED_FORMAT；字节截断 → INVALID_PARAM。
+/// 必须在 begin_frame / end_frame 之间。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_fill_path(
+    handle: *mut Renderer,
+    path_bytes: *const u8,
+    path_len: i32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) -> RendererStatus {
+    if handle.is_null() || path_bytes.is_null() || path_len < 0 {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    let path = std::slice::from_raw_parts(path_bytes, path_len as usize);
+    match renderer.cmd_fill_path(path, [r, g, b, a]) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_fill_path: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 描边任意路径。同 renderer_fill_path 的 path 编码。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_stroke_path(
+    handle: *mut Renderer,
+    path_bytes: *const u8,
+    path_len: i32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+    dash_style: i32,
+) -> RendererStatus {
+    if handle.is_null() || path_bytes.is_null() || path_len < 0 {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    let path = std::slice::from_raw_parts(path_bytes, path_len as usize);
+    match renderer.cmd_stroke_path(path, stroke_width, [r, g, b, a], dash_style) {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_stroke_path: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 矩形 + 线性渐变填充。stops = `[offset, r, g, b, a, ...]`，长度必须 5×N (N ≥ 2)，
+/// offset 升序 ∈ [0, 1]。premultiplied alpha。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_fill_rect_gradient_linear(
+    handle: *mut Renderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    stops: *const f32,
+    stop_count: i32,
+) -> RendererStatus {
+    if handle.is_null() || stops.is_null() || stop_count < 2 {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    // stop_count = 逻辑 stop 数量（不是 float 数）；float 数 = stop_count * 5
+    let float_count = (stop_count as usize).saturating_mul(5);
+    let slice = std::slice::from_raw_parts(stops, float_count);
+    match renderer.cmd_fill_rect_gradient_linear(x, y, w, h, start_x, start_y, end_x, end_y, slice)
+    {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_fill_rect_gradient_linear: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+/// 矩形 + 径向渐变填充。stops 同 linear。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_fill_rect_gradient_radial(
+    handle: *mut Renderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    center_x: f32,
+    center_y: f32,
+    radius_x: f32,
+    radius_y: f32,
+    stops: *const f32,
+    stop_count: i32,
+) -> RendererStatus {
+    if handle.is_null() || stops.is_null() || stop_count < 2 {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let renderer = &*handle;
+    let float_count = (stop_count as usize).saturating_mul(5);
+    let slice = std::slice::from_raw_parts(stops, float_count);
+    match renderer
+        .cmd_fill_rect_gradient_radial(x, y, w, h, center_x, center_y, radius_x, radius_y, slice)
+    {
+        Ok(()) => RENDERER_OK,
+        Err(e) => {
+            crate::log::emit(4, &format!("renderer_fill_rect_gradient_radial: {}", e));
+            e.to_status()
+        }
+    }
+}
+
+// =====================================================================
 // v0.7 phase 3 video ABI（spec §4.1）
 // =====================================================================
 
@@ -1991,6 +2114,213 @@ mod tests {
             )
         };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+    }
+
+    // ---------- v0.7 phase 5 path + 渐变 ABI 测试 ----------
+
+    /// 构造一个最小合法 path：MOVE_TO(10,10) → LINE_TO(50,10) → LINE_TO(50,50) → CLOSE
+    fn make_simple_triangle_path() -> Vec<u8> {
+        let mut p = Vec::new();
+        p.push(0x01u8); // MOVE_TO
+        p.extend_from_slice(&10.0f32.to_le_bytes());
+        p.extend_from_slice(&10.0f32.to_le_bytes());
+        p.push(0x02u8); // LINE_TO
+        p.extend_from_slice(&50.0f32.to_le_bytes());
+        p.extend_from_slice(&10.0f32.to_le_bytes());
+        p.push(0x02u8);
+        p.extend_from_slice(&50.0f32.to_le_bytes());
+        p.extend_from_slice(&50.0f32.to_le_bytes());
+        p.push(0x05u8); // CLOSE
+        p
+    }
+
+    #[test]
+    fn fill_path_inside_frame_simple_triangle_ok() {
+        let h = make_renderer(640, 480);
+        let path = make_simple_triangle_path();
+        unsafe {
+            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        let st = unsafe {
+            renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0)
+        };
+        assert_eq!(st, RENDERER_OK);
+        assert_eq!(unsafe { renderer_end_frame(h) }, RENDERER_OK);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn stroke_path_inside_frame_simple_triangle_ok() {
+        let h = make_renderer(640, 480);
+        let path = make_simple_triangle_path();
+        unsafe {
+            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        let st = unsafe {
+            renderer_stroke_path(h, path.as_ptr(), path.len() as i32, 2.0, 0.9, 0.5, 0.5, 1.0, 0)
+        };
+        assert_eq!(st, RENDERER_OK);
+        assert_eq!(unsafe { renderer_end_frame(h) }, RENDERER_OK);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn fill_path_unknown_opcode_returns_unsupported_format() {
+        let h = make_renderer(640, 480);
+        // 0x06 是 reserved 区间起点（spec §2.3.4 决策 10.1）
+        let path: Vec<u8> = vec![0x06, 0, 0, 0, 0, 0, 0, 0, 0];
+        unsafe {
+            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        let st = unsafe {
+            renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0)
+        };
+        assert_eq!(st, RENDERER_ERR_UNSUPPORTED_FORMAT);
+        unsafe { renderer_end_frame(h) };
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn fill_path_truncated_byte_stream_returns_invalid_param() {
+        let h = make_renderer(640, 480);
+        // MOVE_TO 后只有 4 个字节（不够 8）
+        let path: Vec<u8> = vec![0x01, 1, 2, 3, 4];
+        unsafe {
+            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        let st = unsafe {
+            renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0)
+        };
+        assert_eq!(st, RENDERER_ERR_INVALID_PARAM);
+        unsafe { renderer_end_frame(h) };
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn fill_path_outside_frame_returns_invalid_param() {
+        // 不调 begin_frame 直接 fill_path → cmd_drawing 守卫报 INVALID_PARAM
+        let h = make_renderer(640, 480);
+        let path = make_simple_triangle_path();
+        let st = unsafe {
+            renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0)
+        };
+        assert_eq!(st, RENDERER_ERR_INVALID_PARAM);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn fill_path_null_handle_rejected() {
+        let path = make_simple_triangle_path();
+        let st = unsafe {
+            renderer_fill_path(
+                std::ptr::null_mut(),
+                path.as_ptr(),
+                path.len() as i32,
+                0.5,
+                0.5,
+                0.9,
+                1.0,
+            )
+        };
+        assert_eq!(st, RENDERER_ERR_INVALID_PARAM);
+    }
+
+    #[test]
+    fn gradient_linear_inside_frame_ok() {
+        let h = make_renderer(640, 480);
+        // 2 stops：黑 → 蓝
+        let stops: Vec<f32> = vec![
+            0.0, 0.0, 0.0, 0.0, 1.0, // offset, r, g, b, a
+            1.0, 0.0, 0.0, 1.0, 1.0,
+        ];
+        unsafe {
+            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        let st = unsafe {
+            renderer_fill_rect_gradient_linear(
+                h, 10.0, 10.0, 200.0, 50.0, 10.0, 10.0, 210.0, 10.0,
+                stops.as_ptr(), 2,
+            )
+        };
+        assert_eq!(st, RENDERER_OK);
+        assert_eq!(unsafe { renderer_end_frame(h) }, RENDERER_OK);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn gradient_radial_three_stops_ok() {
+        let h = make_renderer(640, 480);
+        let stops: Vec<f32> = vec![
+            0.0, 1.0, 0.0, 0.0, 1.0,
+            0.5, 0.0, 1.0, 0.0, 1.0,
+            1.0, 0.0, 0.0, 1.0, 1.0,
+        ];
+        unsafe {
+            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        let st = unsafe {
+            renderer_fill_rect_gradient_radial(
+                h, 10.0, 10.0, 100.0, 100.0, 60.0, 60.0, 50.0, 50.0,
+                stops.as_ptr(), 3,
+            )
+        };
+        assert_eq!(st, RENDERER_OK);
+        assert_eq!(unsafe { renderer_end_frame(h) }, RENDERER_OK);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn gradient_one_stop_rejected() {
+        let h = make_renderer(640, 480);
+        let stops: Vec<f32> = vec![0.0, 1.0, 0.0, 0.0, 1.0];
+        unsafe {
+            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        let st = unsafe {
+            renderer_fill_rect_gradient_linear(
+                h, 0.0, 0.0, 100.0, 100.0, 0.0, 0.0, 100.0, 0.0,
+                stops.as_ptr(), 1,
+            )
+        };
+        // stop_count<2 在 FFI 直接拒
+        assert_eq!(st, RENDERER_ERR_INVALID_PARAM);
+        unsafe { renderer_end_frame(h) };
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn gradient_offset_out_of_range_rejected() {
+        let h = make_renderer(640, 480);
+        // offset 1.5 越界
+        let stops: Vec<f32> = vec![
+            0.0, 1.0, 0.0, 0.0, 1.0,
+            1.5, 0.0, 0.0, 1.0, 1.0,
+        ];
+        unsafe {
+            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        let st = unsafe {
+            renderer_fill_rect_gradient_linear(
+                h, 0.0, 0.0, 100.0, 100.0, 0.0, 0.0, 100.0, 0.0,
+                stops.as_ptr(), 2,
+            )
+        };
+        assert_eq!(st, RENDERER_ERR_INVALID_PARAM);
+        unsafe { renderer_end_frame(h) };
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn gradient_null_handle_rejected() {
+        let stops: Vec<f32> = vec![0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0];
+        let st = unsafe {
+            renderer_fill_rect_gradient_linear(
+                std::ptr::null_mut(),
+                0.0, 0.0, 100.0, 100.0, 0.0, 0.0, 100.0, 0.0,
+                stops.as_ptr(), 2,
+            )
+        };
+        assert_eq!(st, RENDERER_ERR_INVALID_PARAM);
     }
 
     // ---------- v0.7 phase 3 video ABI 测试 ----------
