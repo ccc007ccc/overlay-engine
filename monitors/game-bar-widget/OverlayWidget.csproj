@@ -72,6 +72,7 @@
       <DependentUpon>MainWidget.xaml</DependentUpon>
     </Compile>
     <Compile Include="Native\CompositionPump.cs" />
+    <Compile Include="Native\ExternalSurfacePump.cs" />
     <Compile Include="Native\RendererPInvoke.cs" />
     <Compile Include="Native\ScreenInterop.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

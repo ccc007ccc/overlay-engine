@@ -1,20 +1,20 @@
 [package]
-name = "spike-dcomp-xproc"
+name = "desktop-window-monitor"
 version = "0.0.1"
 edition = "2021"
-description = "v1.0 spike: DComp 跨进程 surface 共享验证"
+description = "Overlay engine desktop-window monitor prototype"
 publish = false
 
 [lib]
-name = "spike_dcomp"
+name = "desktop_window"
 path = "src/lib.rs"
 
 [[bin]]
-name = "spike-producer"
+name = "desktop-demo-producer"
 path = "src/bin/producer.rs"
 
 [[bin]]
-name = "spike-consumer"
+name = "desktop-window-consumer"
 path = "src/bin/consumer.rs"
 
 [dependencies]
@@ -36,7 +36,9 @@ windows = { version = "0.59", features = [
     "Win32_System_LibraryLoader",
     "Win32_Storage_FileSystem",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
     "Foundation_Numerics",
 ] }
 windows-core = "0.59"

@@ -59,7 +59,7 @@ namespace OverlayWidget
         private const int SM_CXSCREEN = 0;
         private const int SM_CYSCREEN = 1;
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", ExactSpelling = true)]
         private static extern int GetSystemMetrics(int nIndex);
 
         // LocalSettings 持久化的 key
@@ -79,6 +79,7 @@ namespace OverlayWidget
 
         private IntPtr _renderer = IntPtr.Zero;
         private CompositionPump _pump;
+        private ExternalSurfacePump _externalPump;
         private XboxGameBarWidget _widget;
         private bool _calibrating;
         private Size? _calibratedSize; // null = 没校准过
@@ -248,7 +249,10 @@ namespace OverlayWidget
             UpdateMaxInfo();
             try
             {
-                AttachRenderer();
+                if (!TryAttachExternalSurface())
+                {
+                    AttachRenderer();
+                }
             }
             catch (DllNotFoundException ex)
             {
@@ -267,6 +271,34 @@ namespace OverlayWidget
             // 单靠 SizeChanged 无法 catch 用户改 Windows 显示设置 → widget 内部 px 错位。
             // XamlRoot.Changed 在 RasterizationScale / Size / Visible / Content 任一变化时都 fire。
             TrySubscribeXamlRootChanged();
+        }
+
+        private bool TryAttachExternalSurface()
+        {
+            IntPtr hwnd = ScreenInterop.GetCoreWindowHwnd();
+            if (hwnd == IntPtr.Zero) return false;
+
+            if (!ExternalSurfacePump.TryConnect(out var payload, out string error))
+            {
+                Debug.WriteLine("[OverlayWidget] external surface unavailable: " + error);
+                return false;
+            }
+
+            try
+            {
+                _externalPump = new ExternalSurfacePump(Surface);
+                _externalPump.Start(payload, hwnd);
+                RendererInfo.Text = $"External surface attached: logical={payload.LogicalW}x{payload.LogicalH} render={payload.RenderW}x{payload.RenderH}";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("[OverlayWidget] ExternalSurfacePump.Start threw: " + ex);
+                RendererInfo.Text = "External attach failed: " + ex.GetType().Name + " " + ex.Message;
+                try { _externalPump?.Stop(); } catch { }
+                _externalPump = null;
+                return false;
+            }
         }
 
         private void AttachRenderer()
@@ -461,6 +493,11 @@ namespace OverlayWidget
             {
                 _pump.Dispose();
                 _pump = null;
+            }
+            if (_externalPump != null)
+            {
+                _externalPump.Dispose();
+                _externalPump = null;
             }
             if (_renderer != IntPtr.Zero)
             {

@@ -9,7 +9,7 @@
 resolver = "2"
 members = [
     "rust-renderer",
-    "spikes/dcomp-cross-process",
+    "monitors/desktop-window",
 ]
 
 [profile.release]
