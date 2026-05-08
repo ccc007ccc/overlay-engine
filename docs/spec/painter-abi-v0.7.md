@@ -679,7 +679,7 @@ public readonly struct CaptureHandle { public readonly uint Value; }
 
 **通过判据**：
 - `cargo test --release` 全绿
-- `build-all.ps1 -Configuration Release` 成功
+- `install.ps1 -Configuration Release -SkipInstall` 成功
 - Game Bar widget 实际渲染 demo 画面
 - `git tag v0.7-phase1`
 
