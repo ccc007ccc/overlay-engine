@@ -45,8 +45,9 @@ pub const RENDERER_ERR_DECODE_FAIL: RendererStatus = -10;
 pub const RENDERER_ERR_IO: RendererStatus = -11;
 /// 编码 / opcode 不支持（含 path opcode 0x06+ 保留区间）。
 pub const RENDERER_ERR_UNSUPPORTED_FORMAT: RendererStatus = -12;
-/// WGC 初始化失败 / 系统不支持（保留给 phase 4 capture 使用，phase 2 不构造）。
-#[allow(dead_code)]
+/// WGC 初始化失败 / 系统不支持 / 未实现。v0.7 phase 4 占位返这个 ——
+/// 完整 WGC 实现推迟到 v1.0 server 化（届时 Core 进程不在 UWP 沙盒，
+/// WGC 限制消失，按规划在 v1.0 重做）。
 pub const RENDERER_ERR_CAPTURE_INIT: RendererStatus = -13;
 /// `renderer_resize_canvas` 主动 ResizeBuffers / 重建 D2D bitmap render target 失败
 /// （含 device-lost）。v0.7 lazy-resize 实现下不构造，保留给后续 phase 切到主动模式时使用。

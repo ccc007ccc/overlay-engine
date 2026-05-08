@@ -64,6 +64,13 @@ namespace OverlayWidget.Native
         public const int RENDERER_ERR_VIDEO_DECODE_FAIL = -18;
         public const int RENDERER_ERR_VIDEO_FORMAT_CHANGED = -19;
 
+        // v0.7 phase 4 capture target（spec §4.2） — v0.7 占位，完整 WGC 实现推迟到 v1.0
+        public const int RENDERER_CAPTURE_TARGET_PRIMARY_MONITOR = 0;
+        public const int RENDERER_CAPTURE_TARGET_MONITOR_BY_INDEX = 1;
+        public const int RENDERER_CAPTURE_TARGET_HWND = 2;
+        // WGC 初始化失败 / 系统不支持 / v0.7 未实现
+        public const int RENDERER_ERR_CAPTURE_INIT = -13;
+
         // bitmap format（与 Rust 端 painter::BitmapFormat repr 一致）
         public const int BITMAP_FORMAT_BGRA8 = 0;
         public const int BITMAP_FORMAT_RGBA8 = 1;
@@ -708,6 +715,53 @@ namespace OverlayWidget.Native
         public static extern int renderer_video_close(
             IntPtr handle,
             uint video);
+
+        // ===== v0.7 phase 4 capture（spec §4.2） — 占位 ABI =====
+        //
+        // v0.7 phase 4 不实现完整 WGC（推迟到 v1.0 server 化）。
+        // 调用 capture_open 立刻返 CAPTURE_INIT；widget 业务方应当：
+        //   if (renderer_capture_open(...) != RENDERER_OK) {
+        //       // fallback：用静态 bitmap / 自家 Composition 抓帧 / 跳过 capture 面板
+        //   }
+        // 等 v1.0 server 化（Core 进程不在 UWP 沙盒）时这套 P/Invoke 不变直接 work。
+
+        /// <summary>
+        /// 打开屏幕/窗口捕获。target_type: 0=主显示器, 1=指定 monitor index, 2=HWND。
+        /// target_param: monitor index 或 HWND 数值（u64 跨 32/64 位）。
+        /// v0.7 占位：始终返 CAPTURE_INIT（-13）。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_capture_open(
+            IntPtr handle,
+            int targetType,
+            ulong targetParam,
+            int cursorEnabled,
+            out uint outCaptureHandle);
+
+        /// <summary>
+        /// 拉最新一帧到 GPU 纹理，返 BitmapHandle。同 capture 反复调返同一 handle。
+        /// 没有新帧时仍返上一帧（v1.0 实现后）。v0.7 占位：返 CAPTURE_INIT。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_capture_present_frame(
+            IntPtr handle,
+            uint capture,
+            out uint outBitmap);
+
+        /// <summary>查询 capture 源尺寸。v0.7 占位：返 CAPTURE_INIT。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_capture_get_size(
+            IntPtr handle,
+            uint capture,
+            out uint outWidth,
+            out uint outHeight);
+
+        /// <summary>关闭 capture：内部 framepool / session / bitmap slot 一起回收（v1.0 实现后）。
+        /// v0.7 占位：直接返 OK 让业务 close 路径不抛错。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_capture_close(
+            IntPtr handle,
+            uint capture);
 
         /// <summary>
         /// renderer_video_open_file 的 string 包装：自动 UTF-8 编码 + 临时 fixed 指针。

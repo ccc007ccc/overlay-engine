@@ -724,8 +724,15 @@ public readonly struct CaptureHandle { public readonly uint Value; }
 - 复用 Phase 2 的 bitmap handle 系统
 
 **通过判据**：
-- widget 显示桌面镜像，30s 60fps 不掉
+- WGC 完整实现 + widget 显示桌面镜像，30s 60fps 不掉
 - `git tag v0.7-phase4`
+
+**v0.7 实施现状（2026-05）**：
+- ABI 形态、错误码（`RENDERER_ERR_CAPTURE_INIT`）、3 个 target 常量、
+  C# P/Invoke 全部就位
+- Rust 端 `renderer_capture_*` 4 个函数为**占位实现**：调用立刻返 `CAPTURE_INIT`
+- 完整 WGC 实现推迟到 v1.0 server 化阶段（届时 Core 进程不在 UWP 沙盒，
+  WGC 限制消失，且 server 化重构会重写底层 D2D 接管路径，避免 v0.7 重复投入）
 
 ### Phase 5: Path + 渐变（半天）
 

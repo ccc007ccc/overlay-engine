@@ -840,6 +840,95 @@ pub unsafe extern "system" fn renderer_draw_bitmap(
 }
 
 // =====================================================================
+// v0.7 phase 4 capture ABI（spec §4.2）—— v0.7 占位最小 ABI
+// =====================================================================
+//
+// **状态**：v0.7 phase 4 不做完整 WGC 实现。
+//
+// **理由**：
+// - WGC（Windows.Graphics.Capture）在 UWP MSIX widget 进程的沙盒里能不能 work 未经验证；
+//   spec §7 风险表自己写明"上线前实测，不行就退化为只支持 standalone host"
+// - phase 4 通过判据"widget 显示桌面镜像 30s 60fps 不掉"是整合测试，强依赖 widget 跑通
+// - v1.0 server 化重构时 Core 进程不在 UWP 沙盒，WGC 限制消失，届时一并实现
+//
+// **本次交付**：ABI 形态 / 错误码 / target 常量 / widget P/Invoke 全部占位就位，
+// 调用 `renderer_capture_open` 立刻返 RENDERER_ERR_CAPTURE_INIT。这样 v1.0 server 化
+// 重构时业务方/widget 端代码模板已经在，不会有 ABI 重塑负担。
+//
+// **target 常量**（与 spec §4.2 一致）：
+pub const RENDERER_CAPTURE_TARGET_PRIMARY_MONITOR: i32 = 0;
+pub const RENDERER_CAPTURE_TARGET_MONITOR_BY_INDEX: i32 = 1;
+pub const RENDERER_CAPTURE_TARGET_HWND: i32 = 2;
+
+/// v0.7 占位：始终返 CAPTURE_INIT。完整实现推迟到 v1.0 server 化。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_capture_open(
+    handle: *mut Renderer,
+    target_type: i32,
+    _target_param: u64,
+    _cursor_enabled: i32,
+    out_capture_handle: *mut u32,
+) -> RendererStatus {
+    if handle.is_null() || out_capture_handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    *out_capture_handle = 0;
+    if target_type < RENDERER_CAPTURE_TARGET_PRIMARY_MONITOR
+        || target_type > RENDERER_CAPTURE_TARGET_HWND
+    {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    crate::log::emit(
+        3,
+        "renderer_capture_open: WGC capture is not implemented in v0.7; deferred to v1.0 server-mode",
+    );
+    RENDERER_ERR_CAPTURE_INIT
+}
+
+/// v0.7 占位：始终返 CAPTURE_INIT（capture 没真正打开，handle 永远无效）。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_capture_present_frame(
+    handle: *mut Renderer,
+    _capture: u32,
+    out_bitmap: *mut u32,
+) -> RendererStatus {
+    if handle.is_null() || out_bitmap.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    *out_bitmap = 0;
+    RENDERER_ERR_CAPTURE_INIT
+}
+
+/// v0.7 占位。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_capture_get_size(
+    handle: *mut Renderer,
+    _capture: u32,
+    out_w: *mut u32,
+    out_h: *mut u32,
+) -> RendererStatus {
+    if handle.is_null() || out_w.is_null() || out_h.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    *out_w = 0;
+    *out_h = 0;
+    RENDERER_ERR_CAPTURE_INIT
+}
+
+/// v0.7 占位：直接返 OK（让业务方 close 路径不报错；capture 从未真正分配 slot，
+/// 不存在双重释放问题）。
+#[no_mangle]
+pub unsafe extern "system" fn renderer_capture_close(
+    handle: *mut Renderer,
+    _capture: u32,
+) -> RendererStatus {
+    if handle.is_null() {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    RENDERER_OK
+}
+
+// =====================================================================
 // v0.7 phase 5 path + 渐变（spec §2.3.4 / §2.5）
 // =====================================================================
 
@@ -2114,6 +2203,86 @@ mod tests {
             )
         };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+    }
+
+    // ---------- v0.7 phase 4 capture ABI 占位测试 ----------
+    //
+    // v0.7 不实现 WGC（推迟到 v1.0 server 化），此处只验证占位语义：
+    //   - capture_open 始终返 CAPTURE_INIT（任何合法 target 类型）
+    //   - 各 API 在 null handle 时返 INVALID_PARAM
+    //   - capture_close 在 null handle 之外永远 OK（让业务 close 路径不抛错）
+
+    #[test]
+    fn capture_open_always_returns_capture_init_in_v07() {
+        let h = make_renderer(640, 480);
+        let mut out: u32 = 42;
+        let s = unsafe { renderer_capture_open(h, RENDERER_CAPTURE_TARGET_PRIMARY_MONITOR, 0, 0, &mut out) };
+        assert_eq!(s, RENDERER_ERR_CAPTURE_INIT);
+        assert_eq!(out, 0, "out_capture_handle should be cleared on failure");
+        let s = unsafe { renderer_capture_open(h, RENDERER_CAPTURE_TARGET_MONITOR_BY_INDEX, 1, 0, &mut out) };
+        assert_eq!(s, RENDERER_ERR_CAPTURE_INIT);
+        let s = unsafe { renderer_capture_open(h, RENDERER_CAPTURE_TARGET_HWND, 0xDEAD, 1, &mut out) };
+        assert_eq!(s, RENDERER_ERR_CAPTURE_INIT);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn capture_open_invalid_target_type_rejected() {
+        let h = make_renderer(640, 480);
+        let mut out: u32 = 0;
+        let s = unsafe { renderer_capture_open(h, -1, 0, 0, &mut out) };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+        let s = unsafe { renderer_capture_open(h, 99, 0, 0, &mut out) };
+        assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn capture_present_get_size_return_capture_init() {
+        let h = make_renderer(640, 480);
+        let mut bm: u32 = 5;
+        let s = unsafe { renderer_capture_present_frame(h, 1, &mut bm) };
+        assert_eq!(s, RENDERER_ERR_CAPTURE_INIT);
+        assert_eq!(bm, 0);
+        let mut w: u32 = 100;
+        let mut hh: u32 = 100;
+        let s = unsafe { renderer_capture_get_size(h, 1, &mut w, &mut hh) };
+        assert_eq!(s, RENDERER_ERR_CAPTURE_INIT);
+        assert_eq!(w, 0);
+        assert_eq!(hh, 0);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn capture_close_returns_ok_on_any_handle() {
+        // 占位实现：close 总返 OK（不存在真正的 capture slot，业务 close 路径不抛错）
+        let h = make_renderer(640, 480);
+        assert_eq!(unsafe { renderer_capture_close(h, 0) }, RENDERER_OK);
+        assert_eq!(unsafe { renderer_capture_close(h, 0xDEAD) }, RENDERER_OK);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn capture_null_handle_all_apis_rejected() {
+        let mut out: u32 = 0;
+        assert_eq!(
+            unsafe { renderer_capture_open(std::ptr::null_mut(), 0, 0, 0, &mut out) },
+            RENDERER_ERR_INVALID_PARAM
+        );
+        assert_eq!(
+            unsafe { renderer_capture_present_frame(std::ptr::null_mut(), 1, &mut out) },
+            RENDERER_ERR_INVALID_PARAM
+        );
+        let mut w: u32 = 0;
+        let mut h_: u32 = 0;
+        assert_eq!(
+            unsafe { renderer_capture_get_size(std::ptr::null_mut(), 1, &mut w, &mut h_) },
+            RENDERER_ERR_INVALID_PARAM
+        );
+        assert_eq!(
+            unsafe { renderer_capture_close(std::ptr::null_mut(), 1) },
+            RENDERER_ERR_INVALID_PARAM
+        );
     }
 
     // ---------- v0.7 phase 5 path + 渐变 ABI 测试 ----------
