@@ -1,0 +1,42 @@
+[package]
+name = "spike-dcomp-xproc"
+version = "0.0.1"
+edition = "2021"
+description = "v1.0 spike: DComp 跨进程 surface 共享验证"
+publish = false
+
+[lib]
+name = "spike_dcomp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spike-producer"
+path = "src/bin/producer.rs"
+
+[[bin]]
+name = "spike-consumer"
+path = "src/bin/consumer.rs"
+
+[dependencies]
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_CompositionSwapchain",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_UI_WindowsAndMessaging",
+    "Foundation_Numerics",
+] }
+windows-core = "0.59"
