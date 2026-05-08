@@ -30,6 +30,10 @@ windows = { version = "0.59", features = [
     # v0.7 phase 2：WIC 图片解码（PNG/JPG/BMP/GIF/WEBP）→ ID2D1Bitmap
     "Win32_Graphics_Imaging",
     "Win32_System_Com_StructuredStorage",  # IWICStream 用 IStream 套 memory buffer
+    # v0.7 phase 3：Media Foundation 本地视频解码 → CPU BGRA32 → update_texture
+    "Win32_Media_MediaFoundation",
+    # MFSourceReader::SetCurrentPosition / GetPresentationAttribute 用 PROPVARIANT
+    "Win32_System_Variant",
 ] }
 windows-core = "0.59"
 thiserror = "2"

@@ -52,6 +52,18 @@ pub const RENDERER_ERR_CAPTURE_INIT: RendererStatus = -13;
 /// （含 device-lost）。v0.7 lazy-resize 实现下不构造，保留给后续 phase 切到主动模式时使用。
 #[allow(dead_code)]
 pub const RENDERER_ERR_CANVAS_RESIZE_FAIL: RendererStatus = -14;
+/// v0.7 phase 3 video：MF Source Reader 打开 / 配置 / ReadSample 失败。
+/// 文件不存在、codec 不支持、DRM 拒绝、解码错误统一走这里 —— 业务从日志看 HRESULT。
+pub const RENDERER_ERR_VIDEO_OPEN_FAIL: RendererStatus = -15;
+/// v0.7 phase 3 video：业务把无效 video handle 传给 get_info / seek / present_frame / close。
+/// 也覆盖 ABA 失败（slot 已被回收，generation 不匹配）。
+pub const RENDERER_ERR_VIDEO_NOT_FOUND: RendererStatus = -16;
+/// v0.7 phase 3 video：seek 越界（time_ms > duration_ms）或 SetCurrentPosition 返非零 HRESULT。
+pub const RENDERER_ERR_VIDEO_SEEK_FAIL: RendererStatus = -17;
+/// v0.7 phase 3 video：present_frame 时 ReadSample / Lock 失败 / Buffer 比预期小。
+pub const RENDERER_ERR_VIDEO_DECODE_FAIL: RendererStatus = -18;
+/// v0.7 phase 3 video：解码中流类型变了（hw decoder 切了输出格式），业务需要重新 open。
+pub const RENDERER_ERR_VIDEO_FORMAT_CHANGED: RendererStatus = -19;
 
 /// 日志回调函数指针。
 ///
@@ -84,6 +96,22 @@ pub struct PerfStats {
     pub window_size: u32,
     /// 当前窗口里有效样本数（< window_size 时表示还没收满）
     pub valid_samples: u32,
+}
+
+/// v0.7 phase 3 video：本地视频元数据。spec §4.1 定义。
+/// ABI 与 C# 端 `RendererPInvoke.VideoInfo` 对齐。字段顺序固定。
+#[repr(C)]
+pub struct VideoInfo {
+    /// 视频总时长（毫秒）。MF 拿不到时返 0。
+    pub duration_ms: u64,
+    /// 视频宽度（像素）。
+    pub width: u32,
+    /// 视频高度。
+    pub height: u32,
+    /// 帧率分子（fps = num/den）。MF 拿不到时返 30。
+    pub fps_num: u32,
+    /// 帧率分母。MF 拿不到时返 1。
+    pub fps_den: u32,
 }
 
 /// 不透明渲染器句柄。
@@ -357,6 +385,32 @@ impl Renderer {
     #[allow(dead_code)]
     pub(crate) fn size(&self) -> (u32, u32) {
         self.inner.lock().size()
+    }
+
+    // ===== v0.7 phase 3 video（薄转发） =====
+
+    pub(crate) fn video_open_file(&self, path: &str) -> RendererResult<u32> {
+        self.inner.lock().video_open_file(path)
+    }
+
+    pub(crate) fn video_get_info(&self, video: u32) -> RendererResult<VideoInfo> {
+        self.inner.lock().video_get_info(video)
+    }
+
+    pub(crate) fn video_seek(&self, video: u32, time_ms: u64) -> RendererResult<()> {
+        self.inner.lock().video_seek(video, time_ms)
+    }
+
+    /// present_frame 返 (bitmap_handle, eof_flag)。
+    pub(crate) fn video_present_frame(
+        &self,
+        video: u32,
+    ) -> RendererResult<(crate::renderer::resources::BitmapHandle, bool)> {
+        self.inner.lock().video_present_frame(video)
+    }
+
+    pub(crate) fn video_close(&self, video: u32) -> RendererResult<()> {
+        self.inner.lock().video_close(video)
     }
 }
 

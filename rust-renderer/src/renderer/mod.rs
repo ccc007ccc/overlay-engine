@@ -28,13 +28,18 @@ pub(crate) mod resources;
 pub(crate) mod swapchain;
 /// v0.7 phase 2：WIC 图片解码 → IWICBitmapSource → ID2D1Bitmap1
 pub(crate) mod wic;
+/// v0.7 phase 3：Media Foundation 本地视频解码 → CPU BGRA32 → update_texture 路径
+pub(crate) mod mediafoundation;
 
 use std::ffi::c_void;
 
-use crate::error::RendererResult;
-use crate::ffi::PerfStats;
+use crate::error::{RendererError, RendererResult};
+use crate::ffi::{PerfStats, VideoInfo};
 
 use self::device::GpuDevice;
+use self::mediafoundation::VideoSource;
+use self::painter::TEXTURE_FORMAT_BGRA8;
+use self::resources::{BitmapHandle, ResourceTable};
 use self::swapchain::{PinnedReadbackBackend, PresentFrame};
 
 /// 滑动统计窗口大小（最近 N 帧）。60 帧约 1 秒（@60fps）。
@@ -51,6 +56,11 @@ pub(crate) struct RendererState {
     #[allow(dead_code)]
     gpu: GpuDevice,
     surface: PinnedReadbackBackend,
+
+    /// v0.7 phase 3：视频解码上下文集合。每个 VideoSource 持有一个 IMFSourceReader +
+    /// 它专属的 BitmapHandle（在 painter.bitmaps 里）。close 时先 destroy bitmap 再
+    /// 从 videos 移除，保证两边引用一起退场。
+    videos: ResourceTable<VideoSource>,
 
     /// 已 end_frame 成功的帧数（从 1 开始递增）
     frame_index: u64,
@@ -73,6 +83,7 @@ impl RendererState {
         Ok(Self {
             gpu,
             surface,
+            videos: ResourceTable::new(),
             frame_index: 0,
             render_samples: [0; PERF_WINDOW],
             readback_samples: [0; PERF_WINDOW],
@@ -317,6 +328,114 @@ impl RendererState {
         self.surface.cmd_draw_bitmap(
             bitmap, src_x, src_y, src_w, src_h, dst_x, dst_y, dst_w, dst_h, opacity, interp_mode,
         )
+    }
+
+    // ===== v0.7 phase 3 video（spec §4.1） =====
+
+    /// 打开本地视频文件：先 painter.create_texture(BGRA8) 拿空 bitmap，
+    /// 再 VideoSource::open_file 配 IMFSourceReader（输出 RGB32）。
+    /// 失败时回滚 bitmap，避免泄漏 slot。
+    pub(crate) fn video_open_file(&mut self, path: &str) -> RendererResult<u32> {
+        // VideoSource open 之前先用占位尺寸 1x1 创 bitmap —— 真实尺寸从 MF 拿到后再 resize。
+        // 走两步是因为 video_open_file 不能调 painter（painter 借走 self.surface）。
+        // 简化：先用 dummy 占位 → MF open 拿到 (w,h) → destroy_bitmap → 重新 create_texture。
+        // 总共 1 次额外 create + 1 次额外 destroy（仅 open 时一次性开销，可接受）。
+
+        // step 1：先用临时小 bitmap 占 slot
+        let dummy = self
+            .surface
+            .create_texture(1, 1, TEXTURE_FORMAT_BGRA8)?;
+        // step 2：open MF source reader 拿 (w,h)
+        let video_temp = match VideoSource::open_file(path, dummy) {
+            Ok(v) => v,
+            Err(e) => {
+                // open 失败 → 释放占位 bitmap 不留泄漏
+                let _ = self.surface.destroy_bitmap(dummy);
+                return Err(e);
+            }
+        };
+        let info = video_temp.info();
+        // step 3：destroy 占位 + 创真实尺寸的 bitmap
+        // 顺序：先 destroy → 再 create。slot 不够时 ResourceLimit 报回去。
+        let _ = self.surface.destroy_bitmap(dummy);
+        let real_bitmap = self
+            .surface
+            .create_texture(info.width, info.height, TEXTURE_FORMAT_BGRA8)?;
+        // step 4：把 video_temp 拆出来重建 with real bitmap handle
+        // VideoSource 内部 reader / staging 不依赖 bitmap 字段（仅在 close 时由上层用）
+        let mut video = video_temp;
+        video.bitmap = real_bitmap;
+
+        // step 5：插 videos table。失败要回滚 bitmap。
+        match self.videos.insert(video) {
+            Ok(handle) => Ok(handle),
+            Err(e) => {
+                let _ = self.surface.destroy_bitmap(real_bitmap);
+                Err(e)
+            }
+        }
+    }
+
+    pub(crate) fn video_get_info(&self, video: u32) -> RendererResult<VideoInfo> {
+        let v = self
+            .videos
+            .get(video)
+            .map_err(|_| RendererError::VideoNotFound)?;
+        let info = v.info();
+        Ok(VideoInfo {
+            duration_ms: info.duration_ms,
+            width: info.width,
+            height: info.height,
+            fps_num: info.fps_num,
+            fps_den: info.fps_den,
+        })
+    }
+
+    pub(crate) fn video_seek(&mut self, video: u32, time_ms: u64) -> RendererResult<()> {
+        let v = self
+            .videos
+            .get_mut(video)
+            .map_err(|_| RendererError::VideoNotFound)?;
+        v.seek(time_ms)
+    }
+
+    /// 解一帧并 update_texture 到内部 bitmap。
+    /// 返 (bitmap_handle, eof)。eof=true 表示流结束，bitmap 仍是最后一帧。
+    /// **每个 video 反复调返同一 BitmapHandle**（spec §4.1）—— 业务用 cmd_draw_bitmap 画即可。
+    pub(crate) fn video_present_frame(&mut self, video: u32) -> RendererResult<(BitmapHandle, bool)> {
+        // 拿 video 引用 → 解一帧到 staging → 把 staging 上传到 painter bitmap。
+        // 借用栅栏：read_next_frame 借 &mut videos.get_mut(video)，update_texture 借 &mut self.surface。
+        // 两个借用不重叠。
+        let (bitmap, w, eof) = {
+            let v = self
+                .videos
+                .get_mut(video)
+                .map_err(|_| RendererError::VideoNotFound)?;
+            let (slice_ptr, slice_len, stride, eof, bitmap) = {
+                let (s, stride, eof) = v.read_next_frame()?;
+                (s.as_ptr(), s.len(), stride, eof, v.bitmap)
+            };
+            // SAFETY：slice 来自 v.staging，借用结束前不动。
+            let slice: &[u8] = unsafe { std::slice::from_raw_parts(slice_ptr, slice_len) };
+            self.surface
+                .update_texture(bitmap, slice, stride, TEXTURE_FORMAT_BGRA8)?;
+            (bitmap, stride, eof)
+        };
+        let _ = w; // 留给未来加 perf log
+        Ok((bitmap, eof))
+    }
+
+    /// 关闭一个视频：先 destroy 它的 bitmap，再从 videos 移除。
+    /// 顺序很重要：bitmap 在 painter 的 ResourceTable 里，video drop 不会自动 destroy bitmap。
+    pub(crate) fn video_close(&mut self, video: u32) -> RendererResult<()> {
+        let removed = self
+            .videos
+            .remove(video)
+            .map_err(|_| RendererError::VideoNotFound)?;
+        // bitmap 可能已经被业务（错误地）destroy 过了 —— 这种情况下 painter 端返
+        // ResourceNotFound，我们吞掉（双重释放视为成功，跟其他 destroy_* 路径一致）。
+        let _ = self.surface.destroy_bitmap(removed.bitmap);
+        Ok(())
     }
 
     /// v0.6 end_frame：内部 EndDraw + Present(0, 0)。不返 mapped pointer。

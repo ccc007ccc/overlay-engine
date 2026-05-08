@@ -57,6 +57,12 @@ namespace OverlayWidget.Native
         public const int RENDERER_ERR_UNSUPPORTED_FORMAT = -12;
         // v0.7 §2.6.3 — 画布管理（renderer_resize_canvas 失败专用）
         public const int RENDERER_ERR_CANVAS_RESIZE_FAIL = -14;
+        // v0.7 phase 3 video（spec §4.1）
+        public const int RENDERER_ERR_VIDEO_OPEN_FAIL = -15;
+        public const int RENDERER_ERR_VIDEO_NOT_FOUND = -16;
+        public const int RENDERER_ERR_VIDEO_SEEK_FAIL = -17;
+        public const int RENDERER_ERR_VIDEO_DECODE_FAIL = -18;
+        public const int RENDERER_ERR_VIDEO_FORMAT_CHANGED = -19;
 
         // bitmap format（与 Rust 端 painter::BitmapFormat repr 一致）
         public const int BITMAP_FORMAT_BGRA8 = 0;
@@ -520,6 +526,82 @@ namespace OverlayWidget.Native
             float dstX, float dstY, float dstW, float dstH,
             float opacity,
             int interpMode);
+
+        // ===== v0.7 phase 3 video（spec §4.1） =====
+
+        /// <summary>
+        /// 视频元数据。字段顺序与 Rust <c>VideoInfo</c> struct 一致（duration_ms, w, h, fps_num, fps_den）。
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct VideoInfo
+        {
+            public ulong DurationMs;
+            public uint Width;
+            public uint Height;
+            public uint FpsNum;
+            public uint FpsDen;
+        }
+
+        /// <summary>
+        /// 打开本地视频文件。<paramref name="utf8Path"/> 不要求 NUL 终止；<paramref name="pathLen"/>
+        /// 是字节数（不是字符数）。失败码：VIDEO_OPEN_FAIL / RESOURCE_LIMIT / INVALID_PARAM。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_video_open_file(
+            IntPtr handle,
+            IntPtr utf8Path,
+            int pathLen,
+            out uint outVideoHandle);
+
+        /// <summary>查询视频元数据。video 已 close / 不存在 → VIDEO_NOT_FOUND。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_video_get_info(
+            IntPtr handle,
+            uint video,
+            out VideoInfo outInfo);
+
+        /// <summary>跳到指定毫秒位置。EOS 标志会清掉。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_video_seek(
+            IntPtr handle,
+            uint video,
+            ulong timeMs);
+
+        /// <summary>
+        /// 解一帧到内部 bitmap，返回 BitmapHandle 与 EOF 标志（1=已 EOS）。
+        /// 同 video 反复调返同一 BitmapHandle —— 用 <see cref="renderer_draw_bitmap"/> 画即可。
+        /// **不要** 自行 destroy 这个 bitmap —— <see cref="renderer_video_close"/> 统一回收。
+        /// </summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_video_present_frame(
+            IntPtr handle,
+            uint video,
+            out uint outBitmap,
+            out int outEof);
+
+        /// <summary>关闭视频：内部 IMFSourceReader + bitmap slot 一起回收。video handle 即时失效。</summary>
+        [DllImport(Dll, CallingConvention = CallingConvention.StdCall, ExactSpelling = true)]
+        public static extern int renderer_video_close(
+            IntPtr handle,
+            uint video);
+
+        /// <summary>
+        /// renderer_video_open_file 的 string 包装：自动 UTF-8 编码 + 临时 fixed 指针。
+        /// path null/empty → INVALID_PARAM。
+        /// </summary>
+        public static int VideoOpenFile(IntPtr handle, string path, out uint outVideo)
+        {
+            outVideo = 0;
+            if (string.IsNullOrEmpty(path)) return RENDERER_ERR_INVALID_PARAM;
+            byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(path);
+            unsafe
+            {
+                fixed (byte* p = utf8)
+                {
+                    return renderer_video_open_file(handle, (IntPtr)p, utf8.Length, out outVideo);
+                }
+            }
+        }
 
         /// <summary>
         /// renderer_load_bitmap_from_memory 的便利包装。data 不能为空，调用期间 fix 一份指针。

@@ -9,7 +9,9 @@ use crate::ffi::{
     RENDERER_ERR_DEVICE_INIT, RENDERER_ERR_FRAME_ACQUIRE, RENDERER_ERR_FRAME_HELD,
     RENDERER_ERR_INVALID_PARAM, RENDERER_ERR_IO, RENDERER_ERR_RESOURCE_LIMIT,
     RENDERER_ERR_RESOURCE_NOT_FOUND, RENDERER_ERR_SWAPCHAIN_INIT, RENDERER_ERR_THREAD_INIT,
-    RENDERER_ERR_UNSUPPORTED_FORMAT,
+    RENDERER_ERR_UNSUPPORTED_FORMAT, RENDERER_ERR_VIDEO_DECODE_FAIL,
+    RENDERER_ERR_VIDEO_FORMAT_CHANGED, RENDERER_ERR_VIDEO_NOT_FOUND, RENDERER_ERR_VIDEO_OPEN_FAIL,
+    RENDERER_ERR_VIDEO_SEEK_FAIL,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -75,6 +77,27 @@ pub(crate) enum RendererError {
     #[allow(dead_code)]
     #[error("canvas resize failed: {0}")]
     CanvasResizeFail(#[source] windows::core::Error),
+
+    // ---------- v0.7 phase 3 video ----------
+    /// MF Source Reader 打开 / 配置失败：文件不存在、codec 不支持、DRM 拒绝。
+    #[error("video open failed: {0}")]
+    VideoOpenFail(#[source] windows::core::Error),
+
+    /// 业务用了已 close / 未分配 / generation 不匹配的 VideoHandle。
+    #[error("video handle not found or expired")]
+    VideoNotFound,
+
+    /// SetCurrentPosition 失败（越界 / HRESULT 错）。
+    #[error("video seek failed: {0}")]
+    VideoSeekFail(#[source] windows::core::Error),
+
+    /// ReadSample / Lock / Buffer 校验失败。
+    #[error("video decode failed: {0}")]
+    VideoDecodeFail(String),
+
+    /// 解码中流类型变化（codec 切了输出格式），业务需要重新 open。
+    #[error("video stream format changed mid-decode")]
+    VideoFormatChanged,
 }
 
 impl RendererError {
@@ -93,6 +116,11 @@ impl RendererError {
             Self::Io(_) => RENDERER_ERR_IO,
             Self::UnsupportedFormat(_) => RENDERER_ERR_UNSUPPORTED_FORMAT,
             Self::CanvasResizeFail(_) => RENDERER_ERR_CANVAS_RESIZE_FAIL,
+            Self::VideoOpenFail(_) => RENDERER_ERR_VIDEO_OPEN_FAIL,
+            Self::VideoNotFound => RENDERER_ERR_VIDEO_NOT_FOUND,
+            Self::VideoSeekFail(_) => RENDERER_ERR_VIDEO_SEEK_FAIL,
+            Self::VideoDecodeFail(_) => RENDERER_ERR_VIDEO_DECODE_FAIL,
+            Self::VideoFormatChanged => RENDERER_ERR_VIDEO_FORMAT_CHANGED,
         }
     }
 }
