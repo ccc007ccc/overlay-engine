@@ -183,11 +183,21 @@ namespace OverlayWidget.Native
         private static readonly byte[] s_showcaseUtf8 = Encoding.UTF8.GetBytes("v0.7 primitives");
         private static readonly byte[] s_phase2Utf8 = Encoding.UTF8.GetBytes(
             "v0.7 phase 2 bitmap: BGRA8 | BGRA8 anim | RGBA8 swizzle | nearest|linear");
+        private static readonly byte[] s_phase5Utf8 = Encoding.UTF8.GetBytes(
+            "v0.7 phase 5: SVG path (fill/stroke) | linear gradient | radial gradient");
 
         // 复用缓冲：polyline 三角形点（每帧原地改写，避免 GC alloc）
         private readonly float[] _triPts = new float[6];
         // 复用缓冲：2D 仿射矩阵 [m11,m12,m21,m22,dx,dy]
         private readonly float[] _xform = new float[6];
+
+        // Phase 5：path byte buffer 复用（每帧重写，避免 GC alloc）
+        // 五角星最大用量：5 × (1 MOVE_TO + 4 LINE_TO) + 1 CLOSE ≈ 46 bytes。留足空间避免扩容。
+        private readonly byte[] _phase5PathBuf = new byte[128];
+        // linear gradient stops（2 个，黑→蓝）：10 floats
+        private readonly float[] _phase5LinearStops = new float[10];
+        // radial gradient stops（3 个，红→黄→透明）：15 floats
+        private readonly float[] _phase5RadialStops = new float[15];
 
         // v0.7 phase 2：bitmap showcase（首次 Start 创建 handle，每帧 update + draw，Stop 销毁）
         private Phase2BitmapShowcase _phase2;
@@ -705,6 +715,14 @@ namespace OverlayWidget.Native
             //    （含 src_rect 子矩形 + nearest|linear 插值对比）。
             //    Phase2BitmapShowcase 负责状态生命周期，这里只负责构图。
             if (_phase2 != null) DrawPhase2Showcase(handle, cw, ch, tF);
+
+            // 8) v0.7 Phase 5 path + 渐变 showcase —— 中间带，3 个 slot：
+            //    左：SVG 风格五角星 path（fill_path + stroke_path）
+            //    中：linear gradient 矩形（水平方向 黑 → 蓝）
+            //    右：radial gradient 矩形（中心红 → 边缘透明）
+            //    覆盖 phase 5 全部 4 个 ABI（fill_path / stroke_path /
+            //    fill_rect_gradient_linear / fill_rect_gradient_radial）。
+            DrawPhase5Showcase(handle, cw, ch, tF);
         }
 
         /// <summary>
@@ -978,6 +996,210 @@ namespace OverlayWidget.Native
                         0.85f, 0.95f, 0.85f, 0.9f);
                 }
             }
+        }
+
+        /// <summary>
+        /// v0.7 Phase 5 showcase：中间带，3 个 slot 各覆盖 1-2 个 ABI。
+        ///   slot 0：SVG 风格五角星（绿底 fill_path + 黄边 stroke_path），转动以验证非平凡 path
+        ///   slot 1：水平 linear gradient 矩形（黑 → 蓝），相位随 t 漂移
+        ///   slot 2：radial gradient 矩形（中心红 → 中段黄 → 边缘透明），脉动半径
+        ///
+        /// path opcode 用 little-endian f32 直接写入 byte buffer，per-frame 不 GC alloc
+        /// （buffer / stops 数组都是 readonly 字段一次性分配）。
+        /// </summary>
+        private void DrawPhase5Showcase(IntPtr h, float cw, float ch, float tF)
+        {
+            // 中间带：phase 2 在 ch * 0.04 起 (高 ch * 0.13)，phase 1 在 ch * 0.78 起。
+            // 中间留 ch * 0.20 ~ ch * 0.55 给 phase 5。
+            float margin = cw * 0.05f;
+            float bandY = ch * 0.22f;
+            float bandH = ch * 0.30f;
+
+            // slot 锁正方形：min(横向单 slot 内宽, 纵向 cell 高)。整组居中
+            float horizontalSlotInner = (cw - margin * 2f) / 3f * 0.84f;
+            float verticalCellH = bandH * 0.78f;
+            float slotInnerSize = Math.Min(horizontalSlotInner, verticalCellH);
+            float slotPitch = slotInnerSize / 0.84f;
+            float totalSlotsW = slotPitch * 3f;
+            float bandLeft = margin;
+            float bandWidth = cw - margin * 2f;
+            float startX = bandLeft + (bandWidth - totalSlotsW) * 0.5f;
+            float cellH = slotInnerSize;
+            float cellY = bandY + (bandH - cellH) * 0.5f + bandH * 0.05f;
+
+            // 半透明深底，让 phase 5 内容跟其他 phase 区分
+            const float bgA = 0.35f;
+            Renderer.renderer_fill_rect(h, bandLeft, bandY, bandWidth, bandH,
+                0.05f * bgA, 0.02f * bgA, 0.06f * bgA, bgA);
+
+            int slot = 0;
+            float SlotX(int i) => startX + slotPitch * i + slotPitch * 0.08f;
+            float SlotW() => slotInnerSize;
+
+            // --- slot 0: 五角星 path（fill_path 绿底 + stroke_path 黄边） ---
+            // 五角星 5 个外顶点 + 5 个内顶点（10 个顶点 + 1 close = MOVE_TO + 9 LINE_TO + CLOSE）
+            // 中心 (cx, cy)，外半径 R，内半径 r ≈ R * 0.382。每 36° 一个顶点，外内交替
+            {
+                float x = SlotX(slot), y = cellY, w = SlotW(), hh = cellH;
+                float cx = x + w * 0.5f;
+                float cy = y + hh * 0.5f;
+                float R = Math.Min(w, hh) * 0.42f;
+                float r = R * 0.382f;
+                // 慢速旋转，让 path 是动态的方便肉眼区分"几何在生效"
+                double angle0 = -Math.PI * 0.5 + tF * 0.3;
+
+                int len = WritePentagram(_phase5PathBuf, cx, cy, R, r, (float)angle0);
+
+                // fill: 绿色（premultiplied alpha 1.0）
+                unsafe
+                {
+                    fixed (byte* p = _phase5PathBuf)
+                    {
+                        Renderer.renderer_fill_path(h, (IntPtr)p, len,
+                            0.20f, 0.65f, 0.30f, 1.0f);
+                        // stroke: 黄边（dashStyle=0 solid）
+                        Renderer.renderer_stroke_path(h, (IntPtr)p, len, 2.0f,
+                            0.95f, 0.85f, 0.20f, 1.0f, 0);
+                    }
+                }
+                // slot 框
+                Renderer.renderer_stroke_rect(h, x, y, w, hh, 1f, 0.5f, 0.5f, 0.5f, 0.6f);
+                slot++;
+            }
+
+            // --- slot 1: linear gradient 矩形（水平 黑 → 蓝） ---
+            //   start = slot 左中，end = slot 右中。方向随 t 微微抖动验证渐变线坐标在生效
+            {
+                float x = SlotX(slot), y = cellY, w = SlotW(), hh = cellH;
+                float cy = y + hh * 0.5f;
+                // 起止点随 t 缓慢倾斜（线性渐变方向）
+                float wobble = (float)(Math.Sin(tF * 0.7) * hh * 0.15);
+                float sx = x;
+                float sy = cy - wobble;
+                float ex = x + w;
+                float ey = cy + wobble;
+
+                // 2 stops: offset, r, g, b, a
+                _phase5LinearStops[0] = 0.0f;
+                _phase5LinearStops[1] = 0.0f;
+                _phase5LinearStops[2] = 0.0f;
+                _phase5LinearStops[3] = 0.0f;
+                _phase5LinearStops[4] = 1.0f;
+                _phase5LinearStops[5] = 1.0f;
+                _phase5LinearStops[6] = 0.10f;
+                _phase5LinearStops[7] = 0.20f;
+                _phase5LinearStops[8] = 0.85f;  // 蓝
+                _phase5LinearStops[9] = 1.0f;
+
+                unsafe
+                {
+                    fixed (float* p = _phase5LinearStops)
+                    {
+                        Renderer.renderer_fill_rect_gradient_linear(h,
+                            x, y, w, hh,
+                            sx, sy, ex, ey,
+                            (IntPtr)p, 2);
+                    }
+                }
+                Renderer.renderer_stroke_rect(h, x, y, w, hh, 1f, 0.5f, 0.5f, 0.5f, 0.6f);
+                slot++;
+            }
+
+            // --- slot 2: radial gradient 矩形（中心 红 → 中段 黄 → 边缘 透明） ---
+            //   半径随 t 脉动（验证 radius_x / radius_y 在生效）
+            {
+                float x = SlotX(slot), y = cellY, w = SlotW(), hh = cellH;
+                float cx = x + w * 0.5f;
+                float cy = y + hh * 0.5f;
+                float pulse = (float)(0.85 + Math.Sin(tF * 1.2) * 0.15);
+                float rx = w * 0.5f * pulse;
+                float ry = hh * 0.5f * pulse;
+
+                // 3 stops: 中心红 → 中段黄 → 边缘透明（premultiplied：rgb *= a）
+                _phase5RadialStops[0] = 0.0f;
+                _phase5RadialStops[1] = 0.95f;
+                _phase5RadialStops[2] = 0.20f;
+                _phase5RadialStops[3] = 0.20f;
+                _phase5RadialStops[4] = 1.0f;
+                _phase5RadialStops[5] = 0.5f;
+                _phase5RadialStops[6] = 0.95f;
+                _phase5RadialStops[7] = 0.80f;
+                _phase5RadialStops[8] = 0.20f;
+                _phase5RadialStops[9] = 1.0f;
+                _phase5RadialStops[10] = 1.0f;
+                _phase5RadialStops[11] = 0.0f;
+                _phase5RadialStops[12] = 0.0f;
+                _phase5RadialStops[13] = 0.0f;
+                _phase5RadialStops[14] = 0.0f;
+
+                unsafe
+                {
+                    fixed (float* p = _phase5RadialStops)
+                    {
+                        Renderer.renderer_fill_rect_gradient_radial(h,
+                            x, y, w, hh,
+                            cx, cy, rx, ry,
+                            (IntPtr)p, 3);
+                    }
+                }
+                Renderer.renderer_stroke_rect(h, x, y, w, hh, 1f, 0.5f, 0.5f, 0.5f, 0.6f);
+                slot++;
+            }
+
+            // 标题
+            float lblSize = Math.Max(11f, bandH * 0.06f);
+            unsafe
+            {
+                fixed (byte* p = s_phase5Utf8)
+                {
+                    Renderer.renderer_draw_text(h, (IntPtr)p, s_phase5Utf8.Length,
+                        margin + 4f, bandY + 2f, lblSize,
+                        0.95f, 0.85f, 0.95f, 0.9f);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 写五角星 path 到 buf，返回写入字节数。
+        /// 10 顶点（外内交替），中心 (cx, cy)，外半径 R，内半径 r，起始角 startAngle（弧度）。
+        /// 编码：MOVE_TO + 9 × LINE_TO + CLOSE。每个 f32 = 4 bytes little-endian。
+        /// </summary>
+        private static int WritePentagram(byte[] buf, float cx, float cy, float R, float r, float startAngle)
+        {
+            int idx = 0;
+            // 10 个顶点：i 偶 → 外，i 奇 → 内
+            for (int i = 0; i < 10; i++)
+            {
+                float theta = startAngle + (float)(Math.PI * 0.2 * i); // 36° = π/5
+                float radius = (i % 2 == 0) ? R : r;
+                float vx = cx + (float)Math.Cos(theta) * radius;
+                float vy = cy + (float)Math.Sin(theta) * radius;
+                if (i == 0)
+                {
+                    buf[idx++] = 0x01; // MOVE_TO
+                }
+                else
+                {
+                    buf[idx++] = 0x02; // LINE_TO
+                }
+                WriteF32Le(buf, idx, vx); idx += 4;
+                WriteF32Le(buf, idx, vy); idx += 4;
+            }
+            buf[idx++] = 0x05; // CLOSE
+            return idx;
+        }
+
+        /// <summary>
+        /// 把 f32 按 little-endian 直接写入 buf，避免 BitConverter.GetBytes 的 GC alloc。
+        /// 用 unsafe 位转，兼容 .NET Native 2.2 / netstandard2.0（不依赖 BitConverter.SingleToInt32Bits）。
+        /// </summary>
+        private static unsafe void WriteF32Le(byte[] buf, int offset, float value)
+        {
+            uint bits = *(uint*)(&value);
+            buf[offset + 0] = (byte)(bits & 0xFF);
+            buf[offset + 1] = (byte)((bits >> 8) & 0xFF);
+            buf[offset + 2] = (byte)((bits >> 16) & 0xFF);
+            buf[offset + 3] = (byte)((bits >> 24) & 0xFF);
         }
 
         /// <summary>
