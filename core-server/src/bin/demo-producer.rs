@@ -2,6 +2,7 @@ use bytes::BytesMut;
 use core_server::ipc::protocol::ControlMessage;
 use tokio::io::AsyncWriteExt;
 use tokio::net::windows::named_pipe::ClientOptions;
+use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
 const PIPE_NAME: &str = r"\\.\pipe\overlay-core";
@@ -47,6 +48,7 @@ fn write_cmd_fill_rect(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as u32;
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1) as u32;
     println!("[test-producer] 屏幕分辨率: {}x{}", screen_w, screen_h);
@@ -70,6 +72,9 @@ async fn main() -> anyhow::Result<()> {
     client.write_all(&buf).await?;
     buf.clear();
     println!("[test-producer] 已注册 Producer");
+
+    // 等 server 处理 RegisterProducer 并创建共享内存
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // CreateCanvas（点对点）
     ControlMessage::CreateCanvas {
@@ -130,8 +135,9 @@ async fn main() -> anyhow::Result<()> {
         let cmd_offset: u32 = 24;
         let mut pos = cmd_offset as usize;
 
-        // CLEAR：深色半透明背景
-        write_cmd_clear(shmem_bytes, &mut pos, 0.02, 0.02, 0.05, 0.4);
+        // CLEAR：深色半透明背景（premultiplied: rgb *= alpha）
+        let bg_a = 0.5_f32;
+        write_cmd_clear(shmem_bytes, &mut pos, 0.03 * bg_a, 0.03 * bg_a, 0.06 * bg_a, bg_a);
 
         // 屏幕中心十字
         let cross_w = 4.0;
