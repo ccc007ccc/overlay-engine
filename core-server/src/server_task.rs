@@ -131,20 +131,69 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                             if end <= data.len() {
                                 let cmds = crate::ipc::cmd_decoder::decode_commands(&data[start..end]);
                                 if let Some(canvas) = state.canvases.get(&canvas_id) {
-                                    // 渲染命令到画布的 D3D11 texture
-                                    // TODO: 用 D2DEngine + Painter 执行 DrawCmd
-                                    // 目前先用 ClearRTV 涂颜色证明 SubmitFrame 通路正确
-                                    let color = if !cmds.is_empty() {
-                                        if let crate::ipc::cmd_decoder::RenderCommand::Clear(c) = &cmds[0] {
-                                            *c
-                                        } else {
-                                            [0.0, 1.0, 0.0, 1.0] // 绿色表示有命令但不是 Clear
+                                    let rw = canvas.resources.render_w;
+                                    let rh = canvas.resources.render_h;
+                                    let mut pixels = vec![0u8; (rw * rh * 4) as usize];
+
+                                    for cmd in &cmds {
+                                        match cmd {
+                                            crate::ipc::cmd_decoder::RenderCommand::Clear(c) => {
+                                                let b = (c[2].clamp(0.0, 1.0) * 255.0) as u8;
+                                                let g = (c[1].clamp(0.0, 1.0) * 255.0) as u8;
+                                                let r = (c[0].clamp(0.0, 1.0) * 255.0) as u8;
+                                                let a = (c[3].clamp(0.0, 1.0) * 255.0) as u8;
+                                                for chunk in pixels.chunks_exact_mut(4) {
+                                                    chunk[0] = b;
+                                                    chunk[1] = g;
+                                                    chunk[2] = r;
+                                                    chunk[3] = a;
+                                                }
+                                            }
+                                            crate::ipc::cmd_decoder::RenderCommand::Draw(
+                                                crate::renderer::painter::DrawCmd::FillRect { x, y, w, h, rgba }
+                                            ) => {
+                                                let x0 = (*x as u32).min(rw);
+                                                let y0 = (*y as u32).min(rh);
+                                                let x1 = ((*x + *w) as u32).min(rw);
+                                                let y1 = ((*y + *h) as u32).min(rh);
+                                                let b = (rgba[2].clamp(0.0, 1.0) * 255.0) as u8;
+                                                let g = (rgba[1].clamp(0.0, 1.0) * 255.0) as u8;
+                                                let r = (rgba[0].clamp(0.0, 1.0) * 255.0) as u8;
+                                                let a = (rgba[3].clamp(0.0, 1.0) * 255.0) as u8;
+                                                for py in y0..y1 {
+                                                    for px in x0..x1 {
+                                                        let idx = ((py * rw + px) * 4) as usize;
+                                                        if idx + 3 < pixels.len() {
+                                                            pixels[idx] = b;
+                                                            pixels[idx + 1] = g;
+                                                            pixels[idx + 2] = r;
+                                                            pixels[idx + 3] = a;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
                                         }
-                                    } else {
-                                        [1.0, 0.0, 1.0, 1.0] // 洋红色表示空命令
-                                    };
-                                    let _ = canvas.resources.present_color(&state.devices.d3d_ctx, color);
-                                    println!("SubmitFrame: canvas={} frame={} cmds={}", canvas_id, frame_id, cmds.len());
+                                    }
+
+                                    // UpdateSubresource + Present
+                                    use windows::core::Interface;
+                                    if let Ok(resource) = canvas.resources.texture.cast::<windows::Win32::Graphics::Direct3D11::ID3D11Resource>() {
+                                        unsafe {
+                                            state.devices.d3d_ctx.UpdateSubresource(
+                                                &resource, 0, None,
+                                                pixels.as_ptr() as *const _,
+                                                rw * 4, rw * rh * 4,
+                                            );
+                                            state.devices.d3d_ctx.Flush();
+                                            let _ = canvas.resources.surface.SetBuffer(&canvas.resources.buffer);
+                                            let _ = canvas.resources.manager.Present();
+                                        }
+                                    }
+
+                                    if frame_id % 60 == 0 {
+                                        println!("SubmitFrame: canvas={} frame={} cmds={}", canvas_id, frame_id, cmds.len());
+                                    }
                                 }
                             }
                         }
