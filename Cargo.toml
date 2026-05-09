@@ -9,7 +9,7 @@
 resolver = "2"
 members = [
     "rust-renderer",
-    "monitors/desktop-window",
+    "monitors/desktop-window", "core-server",
 ]
 
 [profile.release]

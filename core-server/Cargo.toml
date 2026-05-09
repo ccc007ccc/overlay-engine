@@ -1,0 +1,63 @@
+[package]
+name = "core-server"
+version = "0.1.0"
+edition = "2021"
+description = "v1.0 standalone core server for overlay engine"
+publish = false
+
+[lib]
+name = "core_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "core-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "demo-producer"
+path = "src/bin/demo-producer.rs"
+
+[[bin]]
+name = "demo-consumer"
+path = "src/bin/demo-consumer.rs"
+
+[dependencies]
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_CompositionSwapchain",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Imaging",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_System_Memory",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_UI_WindowsAndMessaging",
+    "Foundation_Numerics",
+] }
+windows-core = "0.59"
+thiserror = "2"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+bytes = "1.5"
+lazy_static = "1.4"
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
