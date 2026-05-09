@@ -736,6 +736,14 @@ impl<'a> Painter<'a> {
 /// 未来若要做命令流序列化，本 enum 即天然 schema。
 #[derive(Debug, Clone)]
 pub enum DrawCmd {
+    /// 实心矩形填充（v1.0 从直调入口提升到 DrawCmd）
+    FillRect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        rgba: [f32; 4],
+    },
     /// 直线
     DrawLine {
         x0: f32,
@@ -880,6 +888,9 @@ impl<'a> Painter<'a> {
     /// 一帧里某个 brush 创建失败不应该阻断整帧渲染）。
     pub fn execute(&mut self, cmd: &DrawCmd) {
         match cmd {
+            DrawCmd::FillRect { x, y, w, h, rgba } => {
+                self.fill_rect(*x, *y, *w, *h, *rgba);
+            }
             DrawCmd::DrawLine {
                 x0,
                 y0,

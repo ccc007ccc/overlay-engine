@@ -68,6 +68,7 @@ pub const OP_REGISTER_CONSUMER: u16 = 0x0002;
 pub const OP_CREATE_CANVAS: u16 = 0x0003;
 pub const OP_ATTACH_CONSUMER: u16 = 0x0004;
 pub const OP_CANVAS_ATTACHED: u16 = 0x0005;
+pub const OP_SUBMIT_FRAME: u16 = 0x0006;
 
 #[derive(Debug, Clone)]
 pub enum ControlMessage {
@@ -91,6 +92,12 @@ pub enum ControlMessage {
         render_w: u32,
         render_h: u32,
     },
+    SubmitFrame {
+        canvas_id: u32,
+        frame_id: u64,
+        offset: u32,
+        length: u32,
+    },
 }
 
 impl ControlMessage {
@@ -101,6 +108,7 @@ impl ControlMessage {
             Self::CreateCanvas { .. } => OP_CREATE_CANVAS,
             Self::AttachConsumer { .. } => OP_ATTACH_CONSUMER,
             Self::CanvasAttached { .. } => OP_CANVAS_ATTACHED,
+            Self::SubmitFrame { .. } => OP_SUBMIT_FRAME,
         }
     }
 
@@ -161,6 +169,22 @@ impl ControlMessage {
                 buf.put_u32_le(*logical_h);
                 buf.put_u32_le(*render_w);
                 buf.put_u32_le(*render_h);
+            }
+            Self::SubmitFrame {
+                canvas_id,
+                frame_id,
+                offset,
+                length,
+            } => {
+                let header = MessageHeader {
+                    opcode: self.opcode(),
+                    payload_len: 20,
+                };
+                header.encode(buf);
+                buf.put_u32_le(*canvas_id);
+                buf.put_u64_le(*frame_id);
+                buf.put_u32_le(*offset);
+                buf.put_u32_le(*length);
             }
         }
     }
@@ -229,6 +253,20 @@ impl ControlMessage {
                     logical_h: buf.get_u32_le(),
                     render_w: buf.get_u32_le(),
                     render_h: buf.get_u32_le(),
+                })
+            }
+            OP_SUBMIT_FRAME => {
+                if buf.remaining() < 20 {
+                    return Err(ProtocolError::BufferTooSmall {
+                        expected: 20,
+                        actual: buf.remaining(),
+                    });
+                }
+                Ok(Self::SubmitFrame {
+                    canvas_id: buf.get_u32_le(),
+                    frame_id: buf.get_u64_le(),
+                    offset: buf.get_u32_le(),
+                    length: buf.get_u32_le(),
                 })
             }
             _ => Err(ProtocolError::UnknownOpcode(opcode)),

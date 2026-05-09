@@ -109,7 +109,7 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                 }
             }
             ControlMessage::AttachConsumer { canvas_id, consumer_id } => {
-                if let Some((id, true)) = client_id {
+                if let Some((_id, true)) = client_id {
                     let mut state = crate::ipc::server::SERVER_STATE.write();
                     if let Err(e) = state.attach_consumer(canvas_id, consumer_id) {
                         eprintln!("AttachConsumer error: {}", e);
@@ -118,6 +118,37 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                     }
                 } else {
                     eprintln!("Error: AttachConsumer received but client is not a registered producer");
+                }
+            }
+            ControlMessage::SubmitFrame { canvas_id, frame_id, offset, length } => {
+                if let Some((producer_id, true)) = client_id {
+                    let state = crate::ipc::server::SERVER_STATE.read();
+                    if let Some(producer) = state.producers.get(&producer_id) {
+                        if let Some(ref ringbuf) = producer.command_ringbuffer {
+                            let data = ringbuf.data();
+                            let start = offset as usize;
+                            let end = start + length as usize;
+                            if end <= data.len() {
+                                let cmds = crate::ipc::cmd_decoder::decode_commands(&data[start..end]);
+                                if let Some(canvas) = state.canvases.get(&canvas_id) {
+                                    // 渲染命令到画布的 D3D11 texture
+                                    // TODO: 用 D2DEngine + Painter 执行 DrawCmd
+                                    // 目前先用 ClearRTV 涂颜色证明 SubmitFrame 通路正确
+                                    let color = if !cmds.is_empty() {
+                                        if let crate::ipc::cmd_decoder::RenderCommand::Clear(c) = &cmds[0] {
+                                            *c
+                                        } else {
+                                            [0.0, 1.0, 0.0, 1.0] // 绿色表示有命令但不是 Clear
+                                        }
+                                    } else {
+                                        [1.0, 0.0, 1.0, 1.0] // 洋红色表示空命令
+                                    };
+                                    let _ = canvas.resources.present_color(&state.devices.d3d_ctx, color);
+                                    println!("SubmitFrame: canvas={} frame={} cmds={}", canvas_id, frame_id, cmds.len());
+                                }
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
