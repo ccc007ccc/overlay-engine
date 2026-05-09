@@ -1,31 +1,31 @@
 <#
 .SYNOPSIS
-    OverlayWidget 一键安装（开发版）：cargo + msbuild + signtool + Add-AppxPackage。
+    OverlayWidget v1.0 一键安装（开发版）：cargo + msbuild + signtool + Add-AppxPackage。
 
 .DESCRIPTION
     端到端流程，任一步失败立刻退出（$ErrorActionPreference='Stop'）：
 
-      1. cargo build -p renderer --release         -> target\release\renderer.dll
-      2. msbuild OverlayWidget.csproj              -> AppPackages\..\*.msix
+      1. cargo build --release (core-server + desktop-window-monitor + renderer)
+      2. msbuild OverlayWidget.csproj  -> AppPackages\..\*.msix
       3. 自签 dev 证书（首次自动生成，CN=OverlayWidget Dev）
-      4. 导 cert 到 LocalMachine\TrustedPeople     <- 首次需要 Admin
+      4. 导 cert 到 LocalMachine\TrustedPeople  <- 首次需要 Admin
       5. signtool sign MSIX
-      6. 卸旧版 + Add-AppxPackage                  -> 装到系统
+      6. 卸旧版 + Add-AppxPackage  -> 装到系统
 
-    完成后 Xbox Game Bar (Win+G) -> Widget store 能看到 "Overlay Widget"。
+    完成后：
+      - 先启动 core-server：.\target\release\core-server.exe
+      - 再打开 Xbox Game Bar (Win+G) -> Widget store -> 'Overlay Widget'
+      - 或启动桌面监视器：.\target\release\desktop-window-consumer.exe
     卸载用 .\uninstall.ps1。
 
 .PARAMETER Configuration
     Debug 或 Release，默认 Release。
-    Release 启用 .NET Native AOT，体积大、启动快、不依赖框架包。
-    Debug 走标准 IL，需要 Microsoft.NET.CoreRuntime/CoreFramework framework appx 配套
-    （脚本会自动从 AppPackages 旁边的 Dependencies 目录捎带）。
 
 .PARAMETER Platform
     目前只接受 x64。
 
 .PARAMETER SkipRust
-    跳过 cargo 编译。改 C# 不动 Rust 时省时间。
+    跳过 cargo 编译。只改 C# 时省时间。
 
 .PARAMETER SkipCSharp
     跳过 msbuild。只想确认 Rust 编得过时用。
@@ -41,18 +41,12 @@
     完整 Release 构建 + 安装。首次需要 Admin（导 cert）。
 
 .EXAMPLE
-    .\install.ps1 -Configuration Debug -SkipRust
-    Debug 重 build C#，复用上次的 renderer.dll。
+    .\install.ps1 -SkipRust
+    只重编 C# widget，复用上次的 Rust 产物。
 
 .EXAMPLE
     .\install.ps1 -SkipRust -SkipCSharp
     跳过编译，直接签名+装当前 MSIX。
-
-.NOTES
-    要求：rustup/cargo 在 PATH；Visual Studio 装 UWP/MSIX 工作负载（vswhere 找 MSBuild）；
-    Windows SDK 提供 signtool.exe（脚本硬编码 26100/22621 两个 fallback 路径）。
-    csproj <Content Include="..\target\release\renderer.dll"> 写死 release 路径，
-    -Configuration Debug 也用 release renderer.dll，符合预期。
 #>
 
 [CmdletBinding()]
@@ -72,13 +66,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $ProjectRoot     = $PSScriptRoot
-$RustDir         = Join-Path $ProjectRoot 'rust-renderer'
 $CsharpDir       = Join-Path $ProjectRoot 'monitors\game-bar-widget'
 $Csproj          = Join-Path $CsharpDir 'OverlayWidget.csproj'
 $AppPackagesDir  = Join-Path $CsharpDir 'AppPackages'
-# v0.7 起 workspace 根 target/，cargo 不再写 rust-renderer/target/。
-# csproj 里 <Content Include="..\target\release\renderer.dll"> 也是这个路径。
-$RendererDll     = Join-Path $ProjectRoot 'target\release\renderer.dll'
 $PfxPath         = Join-Path $CsharpDir 'OverlayWidget_Dev.pfx'
 $CerPath         = Join-Path $CsharpDir 'OverlayWidget_Dev.cer'
 $CertSubject     = 'CN=OverlayWidget Dev'
@@ -108,8 +98,6 @@ function Resolve-Cargo {
 }
 
 function Resolve-MSBuild {
-    # vswhere 是 MS 官方 VS 定位工具，跨大版本可靠。Windows PowerShell 5.1 的
-    # `${env:ProgramFiles(x86)}` 语法会因括号被识别成调用而失败，改走 [Environment]。
     $pfx86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
     if (-not $pfx86) { $pfx86 = 'C:\Program Files (x86)' }
     $vswhere = Join-Path $pfx86 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -127,7 +115,7 @@ function Resolve-MSBuild {
     }
     $cmd = Get-Command msbuild.exe -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
-    throw "MSBuild.exe not found. Install Visual Studio with the UWP/MSIX workload, or run from a Developer PowerShell."
+    throw "MSBuild.exe not found. Install Visual Studio with the UWP/MSIX workload."
 }
 
 function Resolve-SignTool {
@@ -145,46 +133,56 @@ function Resolve-SignTool {
 $totalSteps = 0
 if (-not $SkipRust)    { $totalSteps++ }
 if (-not $SkipCSharp)  { $totalSteps++ }
-if (-not $SkipInstall) { $totalSteps += 4 }   # cert生成 + cert导入 + sign + AddAppx
+if (-not $SkipInstall) { $totalSteps += 4 }
 if ($totalSteps -eq 0) {
     Write-Host "Nothing to do (all steps skipped)." -ForegroundColor Yellow
     return
 }
 $step = 0
 
-Write-Host "OverlayWidget install" -ForegroundColor White
+Write-Host "OverlayWidget v1.0 install" -ForegroundColor White
 Write-Host "  Configuration : $Configuration" -ForegroundColor DarkGray
 Write-Host "  Platform      : $Platform" -ForegroundColor DarkGray
 Write-Host "  Clean         : $Clean" -ForegroundColor DarkGray
 
 # ============================================================
-# Step 1: cargo build --release
+# Step 1: cargo build --release (all workspace members)
 # ============================================================
 if (-not $SkipRust) {
     $step++
-    Write-Step $step $totalSteps "cargo build -p renderer --release"
+    Write-Step $step $totalSteps "cargo build --release"
 
     $cargo = Resolve-Cargo
     Push-Location $ProjectRoot
     try {
         if ($Clean) {
-            Write-Host "  cargo clean -p renderer" -ForegroundColor DarkGray
-            & $cargo clean -p renderer
+            Write-Host "  cargo clean" -ForegroundColor DarkGray
+            & $cargo clean
             if ($LASTEXITCODE -ne 0) { throw "cargo clean failed: exit $LASTEXITCODE" }
         }
 
-        & $cargo build -p renderer --release
+        & $cargo build --release
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed: exit $LASTEXITCODE" }
     }
     finally {
         Pop-Location
     }
 
-    if (-not (Test-Path $RendererDll)) {
-        throw "cargo succeeded but $RendererDll missing. Check Cargo.toml [lib] crate-type contains cdylib."
+    # 检查关键产物
+    $coreServer = Join-Path $ProjectRoot 'target\release\core-server.exe'
+    $desktopConsumer = Join-Path $ProjectRoot 'target\release\desktop-window-consumer.exe'
+    $rendererDll = Join-Path $ProjectRoot 'target\release\renderer.dll'
+
+    $products = @()
+    foreach ($f in @($coreServer, $desktopConsumer, $rendererDll)) {
+        if (Test-Path $f) {
+            $sz = (Get-Item $f).Length
+            $products += "    $(Split-Path $f -Leaf) ({0:N0} bytes)" -f $sz
+        }
     }
-    $size = (Get-Item $RendererDll).Length
-    Write-Host ("  ok: renderer.dll ({0:N0} bytes)" -f $size) -ForegroundColor Green
+    if ($products.Count -gt 0) {
+        Write-Host ("  ok:`n" + ($products -join "`n")) -ForegroundColor Green
+    }
 }
 
 # ============================================================
@@ -195,10 +193,6 @@ if (-not $SkipCSharp) {
     Write-Step $step $totalSteps "msbuild OverlayWidget ($Configuration|$Platform)"
 
     if (-not (Test-Path $Csproj)) { throw "csproj not found: $Csproj" }
-
-    if (-not (Test-Path $RendererDll)) {
-        throw "renderer.dll missing at $RendererDll. Re-run without -SkipRust first."
-    }
 
     $msbuild = Resolve-MSBuild
     Write-Host "  using: $msbuild" -ForegroundColor DarkGray
@@ -225,9 +219,6 @@ if (-not $SkipCSharp) {
 
 # 后续 Step 3-6 都需要定位最新 MSIX
 function Get-LatestMsix {
-    # UWP SideloadOnly 模式下 AppPackages 目录后缀只有 `_Test`（不带 Configuration），
-    # 形如 `OverlayWidget_0.1.0.0_x64_Test\OverlayWidget_0.1.0.0_x64.msix`。
-    # 按 .msix 文件名的 `_<Platform>.msix` 后缀匹配，再按 LastWriteTime 取最新一次构建。
     $pattern = "_${Platform}\.msix$"
     $cand = Get-ChildItem -Path $AppPackagesDir -Filter 'OverlayWidget_*.msix' -Recurse -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match $pattern } |
@@ -308,7 +299,7 @@ if ($LASTEXITCODE -ne 0) { throw "signtool failed: exit $LASTEXITCODE" }
 Write-Host "  ok: signed" -ForegroundColor Green
 
 # ============================================================
-# Step 6: Remove old + Add-AppxPackage（带 dependencies + retry）
+# Step 6: Remove old + Add-AppxPackage
 # ============================================================
 $step++
 Write-Step $step $totalSteps "Add-AppxPackage"
@@ -319,8 +310,6 @@ if ($existingPkg) {
     Remove-AppxPackage -Package $existingPkg.PackageFullName
 }
 
-# Debug build 依赖 Microsoft.NET.CoreRuntime/CoreFramework/VCLibs framework 包；
-# Release build (UseDotNetNativeToolchain=true) 编原生码不需要。
 $msixDir = Split-Path -Parent $msix
 $depsDir = Join-Path $msixDir "Dependencies\$Platform"
 $depPaths = @()
@@ -329,9 +318,6 @@ if (Test-Path $depsDir) {
         ForEach-Object { $_.FullName }
 }
 
-# 跳过本机已装的 framework 依赖：
-# 大多数 Windows 通过 Windows Update 已带这些包；Store/StorePurchaseApp 占用时
-# 重装会触发 0x80073D02 (RESOURCE_IN_USE)。
 function Test-FrameworkDepInstalled {
     param([string]$DepPath)
     $pkgName = [System.IO.Path]::GetFileNameWithoutExtension($DepPath)
@@ -347,7 +333,6 @@ foreach ($d in $depPaths) {
     }
 }
 
-# 0x80073D02 重试：先正常装；遇 RESOURCE_IN_USE 改 -ForceApplicationShutdown 再来一次。
 function Invoke-AddAppxWithRetry {
     param(
         [string]$Msix,
@@ -368,7 +353,7 @@ function Invoke-AddAppxWithRetry {
         Add-AppxPackage @params
     } catch {
         if ($_.Exception.Message -match '0x80073D02') {
-            throw "Add-AppxPackage failed with 0x80073D02 even after -ForceApplicationShutdown. Close Microsoft Store manually (or run 'wsreset'), then retry."
+            throw "Add-AppxPackage failed with 0x80073D02 even after -ForceApplicationShutdown. Close Microsoft Store manually, then retry."
         }
         throw
     }
@@ -385,4 +370,7 @@ Write-Host "  ok: installed" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "All done." -ForegroundColor Green
-Write-Host "Open Xbox Game Bar (Win+G) -> Widget store -> 'Overlay Widget'." -ForegroundColor Cyan
+Write-Host "Usage:" -ForegroundColor Cyan
+Write-Host "  1. Start core-server:  .\target\release\core-server.exe" -ForegroundColor White
+Write-Host "  2. Open Game Bar:      Win+G -> Widget store -> 'Overlay Widget'" -ForegroundColor White
+Write-Host "  3. Or desktop monitor: .\target\release\desktop-window-consumer.exe" -ForegroundColor White
