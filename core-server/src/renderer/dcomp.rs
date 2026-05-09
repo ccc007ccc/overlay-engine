@@ -134,6 +134,8 @@ impl CanvasResources {
             d3d_ctx.Flush();
             self.surface.SetBuffer(&self.buffer)?;
             self.manager.Present()?;
+            windows::Win32::System::Threading::SleepEx(0, true);
+            while self.manager.GetNextPresentStatistics().is_ok() {}
         }
         Ok(())
     }

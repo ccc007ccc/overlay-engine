@@ -195,6 +195,10 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                                         if let Err(e) = canvas.resources.manager.Present() {
                                             eprintln!("Present error: {}", e);
                                         }
+                                        // alertable wait: let the OS deliver present-retirement APCs
+                                        windows::Win32::System::Threading::SleepEx(0, true);
+                                        // drain retired present statistics to prevent stalling
+                                        while canvas.resources.manager.GetNextPresentStatistics().is_ok() {}
                                     }
 
                                     if frame_id % 60 == 0 {
