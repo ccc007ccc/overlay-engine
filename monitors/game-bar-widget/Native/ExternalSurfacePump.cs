@@ -2,9 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
-using System.Threading;
 using Windows.Foundation;
-using Windows.System.Threading;
 using Windows.UI.Composition;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Hosting;
@@ -14,37 +12,32 @@ namespace OverlayWidget.Native
 {
     internal sealed class ExternalSurfacePump : IDisposable
     {
-        private const string PipePath = @"\\.\pipe\overlay-spike-dcomp";
+        private const string PipePath = @"\\.\pipe\overlay-core";
         private const uint GenericRead = 0x80000000;
         private const uint GenericWrite = 0x40000000;
         private const uint OpenExisting = 3;
         private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
 
+        private const uint IPC_MAGIC = 0x4F56524C; // 'OVRL'
+        private const ushort IPC_VERSION = 1;
+        private const ushort OP_REGISTER_CONSUMER = 0x0002;
+        private const ushort OP_CANVAS_ATTACHED = 0x0005;
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr CreateFileW(
-            string lpFileName,
-            uint dwDesiredAccess,
-            uint dwShareMode,
-            IntPtr lpSecurityAttributes,
-            uint dwCreationDisposition,
-            uint dwFlagsAndAttributes,
-            IntPtr hTemplateFile);
+            string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+            IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+            uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool ReadFile(
-            IntPtr hFile,
-            byte[] lpBuffer,
-            uint nNumberOfBytesToRead,
-            out uint lpNumberOfBytesRead,
-            IntPtr lpOverlapped);
+            IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToRead,
+            out uint lpNumberOfBytesRead, IntPtr lpOverlapped);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool WriteFile(
-            IntPtr hFile,
-            byte[] lpBuffer,
-            uint nNumberOfBytesToWrite,
-            out uint lpNumberOfBytesWritten,
-            IntPtr lpOverlapped);
+            IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite,
+            out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
 
         [DllImport("kernel32.dll")]
         private static extern bool CloseHandle(IntPtr hObject);
@@ -63,11 +56,37 @@ namespace OverlayWidget.Native
         private SpriteVisual _spriteVisual;
         private CompositionSurfaceBrush _brush;
         private ICompositionSurface _surface;
-        private ThreadPoolTimer _timer;
 
         public ExternalSurfacePump(FrameworkElement hostElement)
         {
             _hostElement = hostElement ?? throw new ArgumentNullException(nameof(hostElement));
+        }
+
+        private static void WriteIpcMessage(IntPtr pipe, ushort opcode, byte[] payload)
+        {
+            int headerSize = 12;
+            byte[] msg = new byte[headerSize + (payload?.Length ?? 0)];
+            BitConverter.GetBytes(IPC_MAGIC).CopyTo(msg, 0);
+            BitConverter.GetBytes(IPC_VERSION).CopyTo(msg, 4);
+            BitConverter.GetBytes(opcode).CopyTo(msg, 6);
+            BitConverter.GetBytes((uint)(payload?.Length ?? 0)).CopyTo(msg, 8);
+            if (payload != null && payload.Length > 0)
+                Buffer.BlockCopy(payload, 0, msg, headerSize, payload.Length);
+            WriteFile(pipe, msg, (uint)msg.Length, out _, IntPtr.Zero);
+        }
+
+        private static bool ReadExact(IntPtr pipe, byte[] buf)
+        {
+            int offset = 0;
+            while (offset < buf.Length)
+            {
+                byte[] chunk = new byte[buf.Length - offset];
+                if (!ReadFile(pipe, chunk, (uint)chunk.Length, out uint read, IntPtr.Zero) || read == 0)
+                    return false;
+                Buffer.BlockCopy(chunk, 0, buf, offset, (int)read);
+                offset += (int)read;
+            }
+            return true;
         }
 
         public static bool TryConnect(out ExternalSurfacePayload payload, out string error)
@@ -84,35 +103,42 @@ namespace OverlayWidget.Native
 
             try
             {
-                byte[] pid = BitConverter.GetBytes(GetCurrentProcessId());
-                if (!WriteFile(pipe, pid, (uint)pid.Length, out uint written, IntPtr.Zero) || written != pid.Length)
+                byte[] pidPayload = BitConverter.GetBytes(GetCurrentProcessId());
+                WriteIpcMessage(pipe, OP_REGISTER_CONSUMER, pidPayload);
+
+                byte[] headerBuf = new byte[12];
+                if (!ReadExact(pipe, headerBuf))
                 {
-                    error = "Write PID failed: " + Marshal.GetLastWin32Error();
+                    error = "Read IPC header failed";
                     return false;
                 }
 
-                byte[] buf = new byte[24];
-                int offset = 0;
-                while (offset < buf.Length)
+                uint magic = BitConverter.ToUInt32(headerBuf, 0);
+                ushort version = BitConverter.ToUInt16(headerBuf, 4);
+                ushort opcode = BitConverter.ToUInt16(headerBuf, 6);
+                uint payloadLen = BitConverter.ToUInt32(headerBuf, 8);
+
+                if (magic != IPC_MAGIC || version != IPC_VERSION || opcode != OP_CANVAS_ATTACHED)
                 {
-                    byte[] chunk = new byte[buf.Length - offset];
-                    if (!ReadFile(pipe, chunk, (uint)chunk.Length, out uint read, IntPtr.Zero) || read == 0)
-                    {
-                        error = "Read payload failed: " + Marshal.GetLastWin32Error();
-                        return false;
-                    }
-                    Buffer.BlockCopy(chunk, 0, buf, offset, (int)read);
-                    offset += (int)read;
+                    error = $"Unexpected IPC message: magic={magic:X} ver={version} op={opcode}";
+                    return false;
+                }
+
+                byte[] data = new byte[payloadLen];
+                if (!ReadExact(pipe, data))
+                {
+                    error = "Read CanvasAttached payload failed";
+                    return false;
                 }
 
                 payload = new ExternalSurfacePayload
                 {
                     Pipe = pipe,
-                    SurfaceHandle = new IntPtr(unchecked((long)BitConverter.ToUInt64(buf, 0))),
-                    LogicalW = BitConverter.ToUInt32(buf, 8),
-                    LogicalH = BitConverter.ToUInt32(buf, 12),
-                    RenderW = BitConverter.ToUInt32(buf, 16),
-                    RenderH = BitConverter.ToUInt32(buf, 20),
+                    SurfaceHandle = new IntPtr(unchecked((long)BitConverter.ToUInt64(data, 4))),
+                    LogicalW = BitConverter.ToUInt32(data, 12),
+                    LogicalH = BitConverter.ToUInt32(data, 16),
+                    RenderW = BitConverter.ToUInt32(data, 20),
+                    RenderH = BitConverter.ToUInt32(data, 24),
                 };
                 pipe = IntPtr.Zero;
                 return true;
@@ -187,8 +213,15 @@ namespace OverlayWidget.Native
             float logicalDipW = (float)(_logicalW / scale);
             float logicalDipH = (float)(_logicalH / scale);
 
-            _spriteVisual.Size = new Vector2(logicalDipW, logicalDipH);
-            _spriteVisual.Offset = new Vector3((float)(-viewportX / scale), (float)(-viewportY / scale), 0f);
+            try
+            {
+                _spriteVisual.Size = new Vector2(logicalDipW, logicalDipH);
+                _spriteVisual.Offset = new Vector3((float)(-viewportX / scale), (float)(-viewportY / scale), 0f);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ExternalSurfacePump] UpdateVisualTransform failed: {ex.Message}");
+            }
         }
 
         public void Stop()
