@@ -23,11 +23,10 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW, LoadCursorW,
-    PostQuitMessage, RegisterClassExW, SetTimer, ShowWindow, TranslateMessage,
-    IDC_ARROW, MSG, SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY, WM_DPICHANGED, WM_MOVE, WM_MOVING,
-    WM_SIZE, WM_SIZING, WM_TIMER, WM_WINDOWPOSCHANGED, WNDCLASSEXW, WNDCLASS_STYLES,
-    WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, LoadCursorW,
+    PeekMessageW, PostQuitMessage, RegisterClassExW, ShowWindow, TranslateMessage,
+    IDC_ARROW, MSG, PM_REMOVE, SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY, WM_QUIT,
+    WNDCLASSEXW, WNDCLASS_STYLES, WS_OVERLAPPEDWINDOW,
 };
 
 use core_server::ipc::protocol::{ControlMessage, MessageHeader, HEADER_SIZE};
@@ -43,9 +42,8 @@ struct ViewportState {
     render_h: u32,
 }
 
-thread_local! {
-    static VIEWPORT_STATE: RefCell<Option<ViewportState>> = const { RefCell::new(None) };
-}
+unsafe impl Send for ViewportState {}
+unsafe impl Sync for ViewportState {}
 
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
@@ -53,50 +51,34 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
             PostQuitMessage(0);
             return LRESULT(0);
         }
-        if matches!(
-            msg,
-            WM_TIMER | WM_MOVE | WM_SIZE | WM_WINDOWPOSCHANGED | WM_MOVING | WM_SIZING | WM_DPICHANGED
-        ) {
-            VIEWPORT_STATE.with(|state| {
-                if let Some(s) = state.borrow().as_ref() {
-                    let _ = update_viewport(hwnd, s);
-                }
-            });
-        }
         DefWindowProcW(hwnd, msg, wp, lp)
     }
 }
 
-fn update_viewport(hwnd: HWND, state: &ViewportState) -> windows::core::Result<()> {
+fn update_viewport(hwnd: HWND, state: &ViewportState) {
     let mut rect = RECT::default();
-    unsafe { GetClientRect(hwnd, &mut rect)? };
+    if unsafe { GetClientRect(hwnd, &mut rect) }.is_err() { return; }
     let mut pt = POINT { x: 0, y: 0 };
     unsafe { ClientToScreen(hwnd, &mut pt) };
-    let (cx, cy, cw, ch) = (pt.x, pt.y, rect.right - rect.left, rect.bottom - rect.top);
+    let (cx, cy) = (pt.x, pt.y);
 
     let sx = state.logical_w as f32 / state.render_w as f32;
     let sy = state.logical_h as f32 / state.render_h as f32;
     let matrix = Matrix3x2 {
-        M11: sx,
-        M12: 0.0,
-        M21: 0.0,
-        M22: sy,
-        M31: -(cx as f32),
-        M32: -(cy as f32),
+        M11: sx, M12: 0.0,
+        M21: 0.0, M22: sy,
+        M31: -(cx as f32), M32: -(cy as f32),
     };
     unsafe {
-        state.visual.SetTransform2(&matrix)?;
-        // 每次 timer tick 都 commit，让 DComp 重新拉取 surface 内容
-        state.dcomp_dev.Commit()?;
+        let _ = state.visual.SetTransform2(&matrix);
+        let _ = state.dcomp_dev.Commit();
     }
-    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 
-    // 创建窗口
     let hinst = unsafe { GetModuleHandleW(None)? };
     let class_name = w!("OverlayDesktopMonitor");
     let wcex = WNDCLASSEXW {
@@ -122,7 +104,6 @@ async fn main() -> anyhow::Result<()> {
         )?
     };
 
-    // 连接 core-server
     println!("[desktop-monitor] connecting to {}", PIPE_NAME);
     let mut pipe = loop {
         match ClientOptions::new().open(PIPE_NAME) {
@@ -134,14 +115,12 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // RegisterConsumer
     let msg = ControlMessage::RegisterConsumer { pid: std::process::id() };
     let mut buf = BytesMut::new();
     msg.encode(&mut buf);
     pipe.write_all(&buf).await?;
     println!("[desktop-monitor] sent RegisterConsumer");
 
-    // 等待 CanvasAttached
     println!("[desktop-monitor] waiting for CanvasAttached...");
     let mut header_buf = [0u8; HEADER_SIZE];
     pipe.read_exact(&mut header_buf).await?;
@@ -171,7 +150,6 @@ async fn main() -> anyhow::Result<()> {
         canvas_id, surface_handle_val, logical_w, logical_h, render_w, render_h
     );
 
-    // 用 handle 创建 DComp visual
     let dup_handle = windows::Win32::Foundation::HANDLE(surface_handle_val as *mut _);
     let mut d3d_opt = None;
     unsafe {
@@ -196,41 +174,38 @@ async fn main() -> anyhow::Result<()> {
     let target = unsafe { dcomp_dev.CreateTargetForHwnd(hwnd, true)? };
     unsafe { target.SetRoot(&visual)? };
 
-    VIEWPORT_STATE.with(|state| {
-        *state.borrow_mut() = Some(ViewportState {
-            visual: visual.clone(),
-            dcomp_dev: dcomp_dev.clone(),
-            logical_w, logical_h, render_w, render_h,
-        });
-    });
+    let state = ViewportState {
+        visual: visual.clone(),
+        dcomp_dev: dcomp_dev.clone(),
+        logical_w, logical_h, render_w, render_h,
+    };
 
-    VIEWPORT_STATE.with(|state| {
-        if let Some(s) = state.borrow().as_ref() {
-            let _ = update_viewport(hwnd, s);
-        }
-    });
+    update_viewport(hwnd, &state);
+    unsafe { let _ = ShowWindow(hwnd, SW_SHOW); }
+    println!("[desktop-monitor] visual tree attached, running render loop");
 
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetTimer(Some(hwnd), 1, 16, None);
-    }
-
-    println!("[desktop-monitor] visual tree attached, running message loop");
-
-    // 消息循环在当前线程跑（Win32 要求）
+    // 非阻塞消息循环 + 自控帧率
+    let frame_interval = std::time::Duration::from_micros(8000); // ~120hz commit
     let mut msg = MSG::default();
     loop {
-        let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
-        if !r.as_bool() { break; }
-        unsafe {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        // 处理所有待处理的窗口消息
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if msg.message == WM_QUIT {
+                // 清理退出
+                drop(target);
+                drop(visual);
+                drop(surface_wrapper);
+                return Ok(());
+            }
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
-    }
 
-    VIEWPORT_STATE.with(|state| { *state.borrow_mut() = None; });
-    drop(target);
-    drop(visual);
-    drop(surface_wrapper);
-    Ok(())
+        // 每帧更新 viewport + commit
+        update_viewport(hwnd, &state);
+
+        std::thread::sleep(frame_interval);
+    }
 }

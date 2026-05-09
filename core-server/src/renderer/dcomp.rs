@@ -16,7 +16,7 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, DCompositionCreateSurfaceHandle, IDCompositionDesktopDevice,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice};
 
@@ -80,7 +80,7 @@ impl CanvasResources {
         let handle = unsafe { DCompositionCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, None)? };
         let surface: IPresentationSurface = unsafe { manager.CreatePresentationSurface(handle)? };
         unsafe {
-            surface.SetAlphaMode(DXGI_ALPHA_MODE_IGNORE)?;
+            surface.SetAlphaMode(DXGI_ALPHA_MODE_PREMULTIPLIED)?;
             let src = RECT {
                 left: 0,
                 top: 0,

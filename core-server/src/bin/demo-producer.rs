@@ -224,6 +224,6 @@ async fn main() -> anyhow::Result<()> {
             println!("[test-producer] frame {} FPS={:.1} (cmds={} bytes)", frame_id, current_fps, cmd_length);
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
     }
 }
