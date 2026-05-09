@@ -189,8 +189,12 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
 
                                     unsafe {
                                         ctx.Flush();
-                                        let _ = canvas.resources.surface.SetBuffer(&canvas.resources.buffer);
-                                        let _ = canvas.resources.manager.Present();
+                                        if let Err(e) = canvas.resources.surface.SetBuffer(&canvas.resources.buffer) {
+                                            eprintln!("SetBuffer error: {}", e);
+                                        }
+                                        if let Err(e) = canvas.resources.manager.Present() {
+                                            eprintln!("Present error: {}", e);
+                                        }
                                     }
 
                                     if frame_id % 60 == 0 {

@@ -89,6 +89,15 @@ impl ServerState {
                 tx,
             },
         );
+
+        // auto-attach to all existing canvases
+        let canvas_ids: Vec<u32> = self.canvases.keys().copied().collect();
+        for cid in canvas_ids {
+            if let Err(e) = self.attach_consumer(cid, id) {
+                eprintln!("auto-attach consumer {} to canvas {} failed: {}", id, cid, e);
+            }
+        }
+
         id
     }
 
@@ -106,7 +115,6 @@ impl ServerState {
 
             let resources = CanvasResources::new(&self.devices.d3d, render_w, render_h)?;
 
-            // Fill canvas with an initial color (e.g. semi-transparent black or clear)
             let _ = resources.present_color(&self.devices.d3d_ctx, [0.0, 0.0, 0.0, 0.0]);
 
             self.canvases.insert(
@@ -120,6 +128,15 @@ impl ServerState {
                 },
             );
             producer.canvases.push(id);
+
+            // auto-attach all existing consumers
+            let consumer_ids: Vec<u32> = self.consumers.keys().copied().collect();
+            for cid in consumer_ids {
+                if let Err(e) = self.attach_consumer(id, cid) {
+                    eprintln!("auto-attach consumer {} to canvas {} failed: {}", cid, id, e);
+                }
+            }
+
             Ok(id)
         } else {
             Err(anyhow::anyhow!("Producer not found"))

@@ -1,11 +1,7 @@
-use std::cell::RefCell;
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
-
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::ClientOptions;
-use windows::core::{w, IUnknown, Interface, PCWSTR};
+use windows::core::{w, IUnknown, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::DirectComposition::{
@@ -23,10 +19,11 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, LoadCursorW,
-    PeekMessageW, PostQuitMessage, RegisterClassExW, ShowWindow, TranslateMessage,
-    IDC_ARROW, MSG, PM_REMOVE, SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY, WM_QUIT,
-    WNDCLASSEXW, WNDCLASS_STYLES, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect,
+    GetWindowLongPtrW, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassExW,
+    SetWindowLongPtrW, ShowWindow, TranslateMessage, GWLP_USERDATA, IDC_ARROW, MSG,
+    PM_REMOVE, SW_SHOW, WM_DESTROY, WM_QUIT, WM_WINDOWPOSCHANGED, WNDCLASSEXW,
+    WNDCLASS_STYLES, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 
 use core_server::ipc::protocol::{ControlMessage, MessageHeader, HEADER_SIZE};
@@ -35,6 +32,7 @@ const PIPE_NAME: &str = r"\\.\pipe\overlay-core";
 
 struct ViewportState {
     visual: IDCompositionVisual2,
+    surface: IUnknown,
     dcomp_dev: IDCompositionDesktopDevice,
     logical_w: u32,
     logical_h: u32,
@@ -47,9 +45,19 @@ unsafe impl Sync for ViewportState {}
 
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
-        if msg == WM_DESTROY {
-            PostQuitMessage(0);
-            return LRESULT(0);
+        match msg {
+            WM_DESTROY => {
+                PostQuitMessage(0);
+                return LRESULT(0);
+            }
+            WM_WINDOWPOSCHANGED => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+                if ptr != 0 {
+                    let state = &*(ptr as *const ViewportState);
+                    update_viewport(hwnd, state);
+                }
+            }
+            _ => {}
         }
         DefWindowProcW(hwnd, msg, wp, lp)
     }
@@ -70,6 +78,7 @@ fn update_viewport(hwnd: HWND, state: &ViewportState) {
         M31: -(cx as f32), M32: -(cy as f32),
     };
     unsafe {
+        let _ = state.visual.SetContent(&state.surface);
         let _ = state.visual.SetTransform2(&matrix);
         let _ = state.dcomp_dev.Commit();
     }
@@ -93,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     unsafe { RegisterClassExW(&wcex) };
     let hwnd: HWND = unsafe {
         CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            WS_EX_NOREDIRECTIONBITMAP,
             class_name,
             w!("Desktop Monitor - connecting..."),
             WS_OVERLAPPEDWINDOW,
@@ -176,10 +185,12 @@ async fn main() -> anyhow::Result<()> {
 
     let state = ViewportState {
         visual: visual.clone(),
+        surface: surface_wrapper.clone(),
         dcomp_dev: dcomp_dev.clone(),
         logical_w, logical_h, render_w, render_h,
     };
 
+    unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, &state as *const ViewportState as isize) };
     update_viewport(hwnd, &state);
     unsafe { let _ = ShowWindow(hwnd, SW_SHOW); }
     println!("[desktop-monitor] visual tree attached, running render loop");
