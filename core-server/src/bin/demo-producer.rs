@@ -128,9 +128,23 @@ async fn main() -> anyhow::Result<()> {
     let cw = screen_w as f32;
     let ch = screen_h as f32;
 
+    let mut last_fps_time = std::time::Instant::now();
+    let mut fps_frame_count: u64 = 0;
+    let mut current_fps: f32 = 0.0;
+
     loop {
         frame_id += 1;
+        fps_frame_count += 1;
         let t = frame_id as f32 * 0.02;
+
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(last_fps_time).as_secs_f32();
+        if elapsed >= 1.0 {
+            current_fps = fps_frame_count as f32 / elapsed;
+            fps_frame_count = 0;
+            last_fps_time = now;
+            println!("[test-producer] FPS: {:.1}", current_fps);
+        }
 
         let cmd_offset: u32 = 24;
         let mut pos = cmd_offset as usize;
@@ -176,6 +190,24 @@ async fn main() -> anyhow::Result<()> {
             anim_x - 30.0, anim_y - 30.0, 60.0, 60.0,
             0.9, 0.5, 0.1, 1.0);
 
+        // FPS 条形指示（左上角）：宽度 = fps / 60 * 200px，颜色随 fps 变
+        let fps_bar_w = (current_fps / 60.0).clamp(0.0, 1.0) * 200.0;
+        let (fr, fg, fb) = if current_fps >= 50.0 {
+            (0.2, 0.9, 0.2) // 绿
+        } else if current_fps >= 25.0 {
+            (0.9, 0.9, 0.2) // 黄
+        } else {
+            (0.9, 0.2, 0.2) // 红
+        };
+        // FPS 背景条
+        write_cmd_fill_rect(shmem_bytes, &mut pos,
+            10.0, 10.0, 210.0, 20.0,
+            0.1, 0.1, 0.1, 0.8);
+        // FPS 前景条
+        write_cmd_fill_rect(shmem_bytes, &mut pos,
+            15.0, 13.0, fps_bar_w, 14.0,
+            fr, fg, fb, 1.0);
+
         let cmd_length = (pos - cmd_offset as usize) as u32;
 
         // SubmitFrame
@@ -189,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
         buf.clear();
 
         if frame_id % 60 == 0 {
-            println!("[test-producer] frame {} (cmds={} bytes)", frame_id, cmd_length);
+            println!("[test-producer] frame {} FPS={:.1} (cmds={} bytes)", frame_id, current_fps, cmd_length);
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(16)).await;

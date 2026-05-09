@@ -133,20 +133,13 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                                 if let Some(canvas) = state.canvases.get(&canvas_id) {
                                     let rw = canvas.resources.render_w;
                                     let rh = canvas.resources.render_h;
-                                    let mut pixels = vec![0u8; (rw * rh * 4) as usize];
+                                    let ctx = &state.devices.d3d_ctx;
 
                                     for cmd in &cmds {
                                         match cmd {
                                             crate::ipc::cmd_decoder::RenderCommand::Clear(c) => {
-                                                let b = (c[2].clamp(0.0, 1.0) * 255.0) as u8;
-                                                let g = (c[1].clamp(0.0, 1.0) * 255.0) as u8;
-                                                let r = (c[0].clamp(0.0, 1.0) * 255.0) as u8;
-                                                let a = (c[3].clamp(0.0, 1.0) * 255.0) as u8;
-                                                for chunk in pixels.chunks_exact_mut(4) {
-                                                    chunk[0] = b;
-                                                    chunk[1] = g;
-                                                    chunk[2] = r;
-                                                    chunk[3] = a;
+                                                unsafe {
+                                                    ctx.ClearRenderTargetView(&canvas.resources.rtv, c);
                                                 }
                                             }
                                             crate::ipc::cmd_decoder::RenderCommand::Draw(
@@ -156,18 +149,36 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                                                 let y0 = (*y as u32).min(rh);
                                                 let x1 = ((*x + *w) as u32).min(rw);
                                                 let y1 = ((*y + *h) as u32).min(rh);
-                                                let b = (rgba[2].clamp(0.0, 1.0) * 255.0) as u8;
-                                                let g = (rgba[1].clamp(0.0, 1.0) * 255.0) as u8;
-                                                let r = (rgba[0].clamp(0.0, 1.0) * 255.0) as u8;
-                                                let a = (rgba[3].clamp(0.0, 1.0) * 255.0) as u8;
-                                                for py in y0..y1 {
-                                                    for px in x0..x1 {
-                                                        let idx = ((py * rw + px) * 4) as usize;
-                                                        if idx + 3 < pixels.len() {
-                                                            pixels[idx] = b;
-                                                            pixels[idx + 1] = g;
-                                                            pixels[idx + 2] = r;
-                                                            pixels[idx + 3] = a;
+                                                if x1 > x0 && y1 > y0 {
+                                                    let bw = x1 - x0;
+                                                    let bh = y1 - y0;
+                                                    let b = (rgba[2].clamp(0.0, 1.0) * 255.0) as u8;
+                                                    let g = (rgba[1].clamp(0.0, 1.0) * 255.0) as u8;
+                                                    let r = (rgba[0].clamp(0.0, 1.0) * 255.0) as u8;
+                                                    let a = (rgba[3].clamp(0.0, 1.0) * 255.0) as u8;
+                                                    let mut pixels = vec![0u8; (bw * bh * 4) as usize];
+                                                    for chunk in pixels.chunks_exact_mut(4) {
+                                                        chunk[0] = b;
+                                                        chunk[1] = g;
+                                                        chunk[2] = r;
+                                                        chunk[3] = a;
+                                                    }
+                                                    use windows::core::Interface;
+                                                    if let Ok(resource) = canvas.resources.texture.cast::<windows::Win32::Graphics::Direct3D11::ID3D11Resource>() {
+                                                        let d3d_box = windows::Win32::Graphics::Direct3D11::D3D11_BOX {
+                                                            left: x0,
+                                                            top: y0,
+                                                            front: 0,
+                                                            right: x1,
+                                                            bottom: y1,
+                                                            back: 1,
+                                                        };
+                                                        unsafe {
+                                                            ctx.UpdateSubresource(
+                                                                &resource, 0, Some(&d3d_box),
+                                                                pixels.as_ptr() as *const _,
+                                                                bw * 4, bw * bh * 4,
+                                                            );
                                                         }
                                                     }
                                                 }
@@ -176,19 +187,10 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                                         }
                                     }
 
-                                    // UpdateSubresource + Present
-                                    use windows::core::Interface;
-                                    if let Ok(resource) = canvas.resources.texture.cast::<windows::Win32::Graphics::Direct3D11::ID3D11Resource>() {
-                                        unsafe {
-                                            state.devices.d3d_ctx.UpdateSubresource(
-                                                &resource, 0, None,
-                                                pixels.as_ptr() as *const _,
-                                                rw * 4, rw * rh * 4,
-                                            );
-                                            state.devices.d3d_ctx.Flush();
-                                            let _ = canvas.resources.surface.SetBuffer(&canvas.resources.buffer);
-                                            let _ = canvas.resources.manager.Present();
-                                        }
+                                    unsafe {
+                                        ctx.Flush();
+                                        let _ = canvas.resources.surface.SetBuffer(&canvas.resources.buffer);
+                                        let _ = canvas.resources.manager.Present();
                                     }
 
                                     if frame_id % 60 == 0 {

@@ -24,7 +24,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW, LoadCursorW,
-    PostQuitMessage, RegisterClassExW, SetTimer, SetWindowTextW, ShowWindow, TranslateMessage,
+    PostQuitMessage, RegisterClassExW, SetTimer, ShowWindow, TranslateMessage,
     IDC_ARROW, MSG, SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY, WM_DPICHANGED, WM_MOVE, WM_MOVING,
     WM_SIZE, WM_SIZING, WM_TIMER, WM_WINDOWPOSCHANGED, WNDCLASSEXW, WNDCLASS_STYLES,
     WS_OVERLAPPEDWINDOW,
@@ -86,15 +86,9 @@ fn update_viewport(hwnd: HWND, state: &ViewportState) -> windows::core::Result<(
     };
     unsafe {
         state.visual.SetTransform2(&matrix)?;
+        // 每次 timer tick 都 commit，让 DComp 重新拉取 surface 内容
         state.dcomp_dev.Commit()?;
     }
-
-    let title = format!(
-        "Desktop Monitor | vp=({},{}) {}x{} | log={}x{} ren={}x{}",
-        cx, cy, cw, ch, state.logical_w, state.logical_h, state.render_w, state.render_h
-    );
-    let tw: Vec<u16> = OsStr::new(&title).encode_wide().chain(std::iter::once(0)).collect();
-    unsafe { SetWindowTextW(hwnd, PCWSTR(tw.as_ptr()))? };
     Ok(())
 }
 
@@ -218,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
 
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetTimer(Some(hwnd), 1, 33, None);
+        let _ = SetTimer(Some(hwnd), 1, 16, None);
     }
 
     println!("[desktop-monitor] visual tree attached, running message loop");
