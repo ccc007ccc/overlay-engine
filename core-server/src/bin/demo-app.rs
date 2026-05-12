@@ -116,10 +116,18 @@ fn write_cmd_draw_text(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let unlocked = args.iter().any(|a| a == "--unlocked" || a == "--no-vsync");
+
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as u32;
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1) as u32;
     println!("[demo-app] 屏幕分辨率: {}x{}", screen_w, screen_h);
+    if unlocked {
+        println!("[demo-app] 模式: 无帧数限制 (Unlocked)");
+    } else {
+        println!("[demo-app] 模式: DWM VSync (锁定帧率)");
+    }
     println!("[demo-app] 连接 {}...", PIPE_NAME);
 
     let mut client = loop {
@@ -395,8 +403,14 @@ async fn main() -> anyhow::Result<()> {
         client.write_all(&buf).await?;
         buf.clear();
 
-        if let Err(e) = unsafe { DwmFlush() } {
-            eprintln!("[demo-app] DwmFlush failed: {}", e);
+        if !unlocked {
+            if let Err(e) = unsafe { DwmFlush() } {
+                eprintln!("[demo-app] DwmFlush failed: {}", e);
+                tokio::task::yield_now().await;
+            }
+        } else {
+            // Even unlocked, we yield to allow the tokio runtime to process
+            // other background events if necessary, preventing absolute starvation.
             tokio::task::yield_now().await;
         }
     }
