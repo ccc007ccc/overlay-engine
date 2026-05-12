@@ -30,12 +30,6 @@ namespace OverlayWidget
         private const double SideReserve = 5;
         private const double VerticalReserve = 80;
 
-        private const int SM_CXSCREEN = 0;
-        private const int SM_CYSCREEN = 1;
-
-        [DllImport("user32.dll", ExactSpelling = true)]
-        private static extern int GetSystemMetrics(int nIndex);
-
         private const string LSKey_CalibratedW = "CalibratedW";
         private const string LSKey_CalibratedH = "CalibratedH";
 
@@ -191,8 +185,8 @@ namespace OverlayWidget
                 double scale = XamlRoot?.RasterizationScale ?? 1.0;
                 try
                 {
-                    int physW = GetSystemMetrics(SM_CXSCREEN);
-                    int physH = GetSystemMetrics(SM_CYSCREEN);
+                    int physW = 0, physH = 0;
+                    try { (physW, physH) = ScreenInterop.GetScreenMetrics(); } catch { }
                     if (physW <= 0 || physH <= 0) throw new InvalidOperationException("metrics zero");
                     dipW = physW / scale - SideReserve;
                     dipH = physH / scale - VerticalReserve;
@@ -316,7 +310,7 @@ namespace OverlayWidget
             try
             {
                 int physW = 0, physH = 0;
-                try { physW = GetSystemMetrics(SM_CXSCREEN); physH = GetSystemMetrics(SM_CYSCREEN); } catch { }
+                try { (physW, physH) = ScreenInterop.GetScreenMetrics(); } catch { }
                 double scale = XamlRoot?.RasterizationScale ?? 1.0;
                 int screenDipW = physW > 0 ? (int)(physW / scale) : 4096;
                 int screenDipH = physH > 0 ? (int)(physH / scale) : 4096;
@@ -488,7 +482,7 @@ namespace OverlayWidget
             Size mn = _widget.MinWindowSize;
             Size mx = _widget.MaxWindowSize;
             int physW = 0, physH = 0;
-            try { physW = GetSystemMetrics(SM_CXSCREEN); physH = GetSystemMetrics(SM_CYSCREEN); } catch { }
+            try { (physW, physH) = ScreenInterop.GetScreenMetrics(); } catch { }
             Size target = ComputeMaximizeTarget();
             MaxInfo.Text = string.Format(
                 Loader.GetString("Status_MaxFormat"),

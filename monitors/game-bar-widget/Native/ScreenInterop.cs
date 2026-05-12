@@ -89,6 +89,27 @@ namespace OverlayWidget.Native
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFO lpmi);
 
+        [DllImport("user32.dll", ExactSpelling = true)]
+        private static extern int GetSystemMetrics(int nIndex);
+
+        private const int SM_CXSCREEN = 0;
+        private const int SM_CYSCREEN = 1;
+
+        public static (int Width, int Height) GetScreenMetrics()
+        {
+            try
+            {
+                int w = GetSystemMetrics(SM_CXSCREEN);
+                int h = GetSystemMetrics(SM_CYSCREEN);
+                if (w > 0 && h > 0)
+                {
+                    return (w, h);
+                }
+            }
+            catch { }
+            return (1920, 1080); // Fallback
+        }
+
         /// <summary>
         /// 当前线程 CoreWindow 的 HWND。必须在 UI 线程调，
         /// 在 widget host 进程内 ICoreWindowInterop QI 必然成功。

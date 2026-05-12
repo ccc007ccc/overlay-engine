@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -13,63 +14,29 @@ namespace OverlayWidget.Native
 {
     public sealed class OverlayPump : IDisposable
     {
-        private const string PipePath = @"\\.\pipe\overlay-core";
-        private const uint GenericRead = 0x80000000;
-        private const uint GenericWrite = 0x40000000;
-        private const uint OpenExisting = 3;
-        private const uint FileFlagOverlapped = 0x40000000;
-        private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
-
+        private const string PipeName = "overlay-core";
         private const uint IPC_MAGIC = 0x4F56524C; // 'OVRL'
         private const ushort IPC_VERSION = 1;
-        private const ushort OP_REGISTER_MONITOR = 0x0002;
-        private const ushort OP_CANVAS_ATTACHED = 0x0005;
-        private const ushort OP_APP_DETACHED = 0x0006;
-        private const ushort OP_MONITOR_LOCAL_ATTACHED = 0x0007;
 
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern IntPtr CreateFileW(
-            string lpFileName, uint dwDesiredAccess, uint dwShareMode,
-            IntPtr lpSecurityAttributes, uint dwCreationDisposition,
-            uint dwFlagsAndAttributes, IntPtr hTemplateFile);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool ReadFile(
-            IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToRead,
-            out uint lpNumberOfBytesRead, IntPtr lpOverlapped);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool WriteFile(
-            IntPtr hFile, byte[] lpBuffer, uint nNumberOfBytesToWrite,
-            out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
-
-        [DllImport("kernel32.dll")]
-        private static extern bool CloseHandle(IntPtr hObject);
-
-        [DllImport("kernel32.dll")]
-        private static extern uint GetCurrentProcessId();
+        private enum IpcOpcode : ushort
+        {
+            RegisterMonitor = 0x0002,
+            CanvasAttached = 0x0005,
+            AppDetached = 0x0006,
+            MonitorLocalAttached = 0x0007
+        }
 
         private readonly FrameworkElement _hostElement;
         private IntPtr _hwnd;
-        private IntPtr _pipe = IntPtr.Zero;
-
+        private NamedPipeClientStream _pipeStream;
         private CancellationTokenSource _cts;
         private Task _readerTask;
 
         private Compositor _compositor;
         private ContainerVisual _rootVisual;
 
-        // World Surface
-        private ICompositionSurface _worldSurface;
-        private CompositionSurfaceBrush _worldBrush;
-        private SpriteVisual _worldVisual;
-        private uint _worldLogicalW, _worldLogicalH;
-
-        // MonitorLocal Surface
-        private ICompositionSurface _mlSurface;
-        private CompositionSurfaceBrush _mlBrush;
-        private SpriteVisual _mlVisual;
-        private uint _mlLogicalW, _mlLogicalH;
+        private OverlayLayer _worldLayer;
+        private OverlayLayer _mlLayer;
 
         public event Action<string> OnStatusChanged;
 
@@ -85,8 +52,7 @@ namespace OverlayWidget.Native
 
             InitVisualTree();
 
-            // Run connection loop in background
-            _readerTask = Task.Run(() => ConnectionLoop(_cts.Token), _cts.Token);
+            _readerTask = ConnectionLoopAsync(_cts.Token);
 
             _hostElement.SizeChanged += OnHostSizeChanged;
             Windows.UI.Xaml.Media.CompositionTarget.Rendering += OnRendering;
@@ -98,37 +64,41 @@ namespace OverlayWidget.Native
             _compositor = hostVisual.Compositor;
             _rootVisual = _compositor.CreateContainerVisual();
             ElementCompositionPreview.SetElementChildVisual(_hostElement, _rootVisual);
+
+            _worldLayer = new OverlayLayer(_compositor, _rootVisual, isTopLayer: false);
+            _mlLayer = new OverlayLayer(_compositor, _rootVisual, isTopLayer: true);
         }
 
-        private void ConnectionLoop(CancellationToken token)
+        private async Task ConnectionLoopAsync(CancellationToken token)
         {
+            byte[] headerBuf = new byte[12];
+            byte[] payloadBuf = new byte[4096];
+
             while (!token.IsCancellationRequested)
             {
                 OnStatusChanged?.Invoke("Connecting to Core Server...");
-                _pipe = CreateFileW(PipePath, GenericRead | GenericWrite, 0, IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
 
-                if (_pipe == InvalidHandleValue)
-                {
-                    // Pipe busy or not found, wait and retry
-                    Task.Delay(500, token).Wait();
-                    continue;
-                }
+                // Dispose previous stream if any
+                _pipeStream?.Dispose();
+                _pipeStream = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
 
                 try
                 {
+                    // UWP sandbox allows named pipe connection if the server explicitly granted access
+                    await _pipeStream.ConnectAsync(500, token);
+                    OnStatusChanged?.Invoke("Connected. Registering...");
+
                     // Register Monitor
-                    byte[] pidPayload = BitConverter.GetBytes(GetCurrentProcessId());
-                    WriteIpcMessage(_pipe, OP_REGISTER_MONITOR, pidPayload);
+                    byte[] pidPayload = BitConverter.GetBytes(System.Diagnostics.Process.GetCurrentProcess().Id);
+                    await WriteIpcMessageAsync(_pipeStream, IpcOpcode.RegisterMonitor, pidPayload, token);
+
                     OnStatusChanged?.Invoke("Registered with Core Server. Waiting for Canvas...");
 
                     // Read Loop
-                    byte[] headerBuf = new byte[12];
                     while (!token.IsCancellationRequested)
                     {
-                        if (!ReadExact(_pipe, headerBuf))
-                        {
+                        if (!await ReadExactAsync(_pipeStream, headerBuf, 12, token))
                             break; // Connection lost
-                        }
 
                         uint magic = BitConverter.ToUInt32(headerBuf, 0);
                         ushort version = BitConverter.ToUInt16(headerBuf, 4);
@@ -137,73 +107,90 @@ namespace OverlayWidget.Native
 
                         if (magic != IPC_MAGIC) break;
 
-                        byte[] payload = null;
                         if (payloadLen > 0)
                         {
-                            payload = new byte[payloadLen];
-                            if (!ReadExact(_pipe, payload)) break;
+                            if (payloadLen > payloadBuf.Length)
+                            {
+                                // Resize buffer if a larger payload arrives (rare)
+                                payloadBuf = new byte[payloadLen];
+                            }
+                            if (!await ReadExactAsync(_pipeStream, payloadBuf, (int)payloadLen, token))
+                                break;
                         }
 
-                        HandleMessage(opcode, payload);
+                        HandleMessage((IpcOpcode)opcode, payloadBuf, payloadLen);
                     }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"[OverlayPump] IPC Loop error: {ex}");
+                    Debug.WriteLine($"[OverlayPump] IPC Loop error: {ex.Message}");
                 }
                 finally
                 {
-                    if (_pipe != IntPtr.Zero && _pipe != InvalidHandleValue)
-                    {
-                        CloseHandle(_pipe);
-                        _pipe = IntPtr.Zero;
-                    }
+                    _pipeStream?.Dispose();
+                    _pipeStream = null;
                 }
 
                 // Cleanup UI upon disconnect
-                _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, ClearSurfaces);
+                _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, ClearAllSurfaces);
                 OnStatusChanged?.Invoke("Disconnected. Retrying...");
-                Task.Delay(1000, token).Wait();
+
+                try { await Task.Delay(1000, token); }
+                catch (OperationCanceledException) { break; }
             }
         }
 
-        private void HandleMessage(ushort opcode, byte[] payload)
+        private void HandleMessage(IpcOpcode opcode, byte[] payload, uint payloadLen)
         {
             switch (opcode)
             {
-                case OP_CANVAS_ATTACHED:
+                case IpcOpcode.CanvasAttached:
                 {
-                    if (payload == null || payload.Length < 28) break;
+                    if (payloadLen < 28) break;
                     long handleRaw = unchecked((long)BitConverter.ToUInt64(payload, 4));
                     uint logW = BitConverter.ToUInt32(payload, 12);
                     uint logH = BitConverter.ToUInt32(payload, 16);
 
                     _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
                     {
-                        try { MountWorldSurface(new IntPtr(handleRaw), logW, logH); }
+                        try
+                        {
+                            _worldLayer.MountSurface(new IntPtr(handleRaw), logW, logH);
+                            UpdateVisualTransform();
+                            OnStatusChanged?.Invoke($"Attached World Canvas: {logW}x{logH}");
+                        }
                         catch (Exception ex) { Debug.WriteLine($"[OverlayPump] MountWorldSurface threw: {ex}"); }
                     });
                     break;
                 }
-                case OP_MONITOR_LOCAL_ATTACHED:
+                case IpcOpcode.MonitorLocalAttached:
                 {
-                    if (payload == null || payload.Length < 24) break;
+                    if (payloadLen < 24) break;
                     long handleRaw = unchecked((long)BitConverter.ToUInt64(payload, 8));
                     uint logW = BitConverter.ToUInt32(payload, 16);
                     uint logH = BitConverter.ToUInt32(payload, 20);
 
                     _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
                     {
-                        try { MountMonitorLocalSurface(new IntPtr(handleRaw), logW, logH); }
+                        try
+                        {
+                            _mlLayer.MountSurface(new IntPtr(handleRaw), logW, logH);
+                            _mlLayer.SetFixedTransform(0, 0);
+                            OnStatusChanged?.Invoke($"Attached MonitorLocal Surface: {logW}x{logH}");
+                        }
                         catch (Exception ex) { Debug.WriteLine($"[OverlayPump] MountMonitorLocalSurface threw: {ex}"); }
                     });
                     break;
                 }
-                case OP_APP_DETACHED:
+                case IpcOpcode.AppDetached:
                 {
                     _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
                     {
-                        try { ClearSurfaces(); } catch { }
+                        try { ClearAllSurfaces(); } catch { }
                     });
                     break;
                 }
@@ -213,87 +200,14 @@ namespace OverlayWidget.Native
             }
         }
 
-        private void MountWorldSurface(IntPtr handle, uint logicalW, uint logicalH)
+        private void ClearAllSurfaces()
         {
-            ClearWorldSurface();
-
-            _worldLogicalW = logicalW;
-            _worldLogicalH = logicalH;
-
-            ICompositorInterop interop = (ICompositorInterop)(object)_compositor;
-            interop.CreateCompositionSurfaceForHandle(handle, out object surfaceObj);
-            _worldSurface = (ICompositionSurface)surfaceObj;
-
-            _worldBrush = _compositor.CreateSurfaceBrush(_worldSurface);
-            _worldBrush.Stretch = CompositionStretch.Fill;
-
-            _worldVisual = _compositor.CreateSpriteVisual();
-            _worldVisual.Brush = _worldBrush;
-
-            // World visual goes at the bottom (index 0)
-            _rootVisual.Children.InsertAtBottom(_worldVisual);
-
-            UpdateVisualTransform();
-            OnStatusChanged?.Invoke($"Attached World Canvas: {logicalW}x{logicalH}");
+            _worldLayer.Clear();
+            _mlLayer.Clear();
         }
 
-        private void MountMonitorLocalSurface(IntPtr handle, uint logicalW, uint logicalH)
-        {
-            ClearMonitorLocalSurface();
-
-            _mlLogicalW = logicalW;
-            _mlLogicalH = logicalH;
-
-            ICompositorInterop interop = (ICompositorInterop)(object)_compositor;
-            interop.CreateCompositionSurfaceForHandle(handle, out object surfaceObj);
-            _mlSurface = (ICompositionSurface)surfaceObj;
-
-            _mlBrush = _compositor.CreateSurfaceBrush(_mlSurface);
-            _mlBrush.Stretch = CompositionStretch.Fill;
-
-            _mlVisual = _compositor.CreateSpriteVisual();
-            _mlVisual.Brush = _mlBrush;
-
-            // Scale and size are fixed to the widget's internal dip sizes
-            _mlVisual.Size = new Vector2((float)logicalW, (float)logicalH);
-            _mlVisual.Offset = new Vector3(0, 0, 0);
-
-            // ML visual goes on top
-            _rootVisual.Children.InsertAtTop(_mlVisual);
-            OnStatusChanged?.Invoke($"Attached MonitorLocal Surface: {logicalW}x{logicalH}");
-        }
-
-        private void ClearSurfaces()
-        {
-            ClearWorldSurface();
-            ClearMonitorLocalSurface();
-        }
-
-        private void ClearWorldSurface()
-        {
-            if (_worldVisual != null)
-            {
-                _rootVisual.Children.Remove(_worldVisual);
-                _worldVisual.Dispose();
-                _worldVisual = null;
-            }
-            if (_worldBrush != null) { _worldBrush.Dispose(); _worldBrush = null; }
-            if (_worldSurface is IDisposable ds) { ds.Dispose(); }
-            _worldSurface = null;
-        }
-
-        private void ClearMonitorLocalSurface()
-        {
-            if (_mlVisual != null)
-            {
-                _rootVisual.Children.Remove(_mlVisual);
-                _mlVisual.Dispose();
-                _mlVisual = null;
-            }
-            if (_mlBrush != null) { _mlBrush.Dispose(); _mlBrush = null; }
-            if (_mlSurface is IDisposable ds) { ds.Dispose(); }
-            _mlSurface = null;
-        }
+        private float _lastViewportX, _lastViewportY;
+        private double _lastScale;
 
         private void OnHostSizeChanged(object sender, SizeChangedEventArgs e) => UpdateVisualTransform();
 
@@ -301,7 +215,7 @@ namespace OverlayWidget.Native
 
         private void UpdateVisualTransform()
         {
-            if (_worldVisual == null || _hwnd == IntPtr.Zero) return;
+            if (!_worldLayer.IsMounted || _hwnd == IntPtr.Zero) return;
 
             double scale = _hostElement.XamlRoot?.RasterizationScale ?? 1.0;
             if (scale <= 0) scale = 1.0;
@@ -323,13 +237,21 @@ namespace OverlayWidget.Native
 
             float viewportX = (float)(winLeft + hostOrigin.X * scale);
             float viewportY = (float)(winTop + hostOrigin.Y * scale);
-            float logicalDipW = (float)(_worldLogicalW / scale);
-            float logicalDipH = (float)(_worldLogicalH / scale);
+
+            // Debounce unnecessary updates
+            if (Math.Abs(_lastViewportX - viewportX) < 0.1 && Math.Abs(_lastViewportY - viewportY) < 0.1 && Math.Abs(_lastScale - scale) < 0.01)
+                return;
+
+            _lastViewportX = viewportX;
+            _lastViewportY = viewportY;
+            _lastScale = scale;
+
+            float logicalDipW = (float)(_worldLayer.LogicalW / scale);
+            float logicalDipH = (float)(_worldLayer.LogicalH / scale);
 
             try
             {
-                _worldVisual.Size = new Vector2(logicalDipW, logicalDipH);
-                _worldVisual.Offset = new Vector3((float)(-viewportX / scale), (float)(-viewportY / scale), 0f);
+                _worldLayer.SetFixedTransform((float)(-viewportX / scale), (float)(-viewportY / scale), logicalDipW, logicalDipH);
             }
             catch (Exception ex)
             {
@@ -337,29 +259,30 @@ namespace OverlayWidget.Native
             }
         }
 
-        private static void WriteIpcMessage(IntPtr pipe, ushort opcode, byte[] payload)
+        private static async Task WriteIpcMessageAsync(NamedPipeClientStream stream, IpcOpcode opcode, byte[] payload, CancellationToken token)
         {
             int headerSize = 12;
             byte[] msg = new byte[headerSize + (payload?.Length ?? 0)];
             BitConverter.GetBytes(IPC_MAGIC).CopyTo(msg, 0);
             BitConverter.GetBytes(IPC_VERSION).CopyTo(msg, 4);
-            BitConverter.GetBytes(opcode).CopyTo(msg, 6);
+            BitConverter.GetBytes((ushort)opcode).CopyTo(msg, 6);
             BitConverter.GetBytes((uint)(payload?.Length ?? 0)).CopyTo(msg, 8);
+
             if (payload != null && payload.Length > 0)
                 Buffer.BlockCopy(payload, 0, msg, headerSize, payload.Length);
-            WriteFile(pipe, msg, (uint)msg.Length, out _, IntPtr.Zero);
+
+            await stream.WriteAsync(msg, 0, msg.Length, token);
+            await stream.FlushAsync(token);
         }
 
-        private static bool ReadExact(IntPtr pipe, byte[] buf)
+        private static async Task<bool> ReadExactAsync(NamedPipeClientStream stream, byte[] buf, int count, CancellationToken token)
         {
             int offset = 0;
-            while (offset < buf.Length)
+            while (offset < count)
             {
-                byte[] chunk = new byte[buf.Length - offset];
-                if (!ReadFile(pipe, chunk, (uint)chunk.Length, out uint read, IntPtr.Zero) || read == 0)
-                    return false;
-                Buffer.BlockCopy(chunk, 0, buf, offset, (int)read);
-                offset += (int)read;
+                int read = await stream.ReadAsync(buf, offset, count - offset, token);
+                if (read == 0) return false;
+                offset += read;
             }
             return true;
         }
@@ -370,21 +293,91 @@ namespace OverlayWidget.Native
             try { Windows.UI.Xaml.Media.CompositionTarget.Rendering -= OnRendering; } catch { }
             try { _hostElement.SizeChanged -= OnHostSizeChanged; } catch { }
 
+            _pipeStream?.Dispose();
+
             _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
             {
-                ClearSurfaces();
+                ClearAllSurfaces();
                 try { ElementCompositionPreview.SetElementChildVisual(_hostElement, null); } catch { }
                 if (_rootVisual != null) { _rootVisual.Dispose(); _rootVisual = null; }
             });
-
-            if (_pipe != IntPtr.Zero && _pipe != InvalidHandleValue)
-            {
-                try { CloseHandle(_pipe); } catch { }
-            }
-            _pipe = IntPtr.Zero;
         }
 
         public void Dispose() => Stop();
+
+        // --------------------------------------------------------
+        // Embedded Class: OverlayLayer
+        // --------------------------------------------------------
+        private class OverlayLayer : IDisposable
+        {
+            private readonly Compositor _compositor;
+            private readonly ContainerVisual _parent;
+            private readonly bool _isTopLayer;
+
+            private ICompositionSurface _surface;
+            private CompositionSurfaceBrush _brush;
+            private SpriteVisual _visual;
+
+            public uint LogicalW { get; private set; }
+            public uint LogicalH { get; private set; }
+            public bool IsMounted => _visual != null;
+
+            public OverlayLayer(Compositor compositor, ContainerVisual parent, bool isTopLayer)
+            {
+                _compositor = compositor;
+                _parent = parent;
+                _isTopLayer = isTopLayer;
+            }
+
+            public void MountSurface(IntPtr handle, uint logicalW, uint logicalH)
+            {
+                Clear();
+
+                LogicalW = logicalW;
+                LogicalH = logicalH;
+
+                ICompositorInterop interop = (ICompositorInterop)(object)_compositor;
+                interop.CreateCompositionSurfaceForHandle(handle, out object surfaceObj);
+                _surface = (ICompositionSurface)surfaceObj;
+
+                _brush = _compositor.CreateSurfaceBrush(_surface);
+                _brush.Stretch = CompositionStretch.Fill;
+
+                _visual = _compositor.CreateSpriteVisual();
+                _visual.Brush = _brush;
+
+                if (_isTopLayer)
+                    _parent.Children.InsertAtTop(_visual);
+                else
+                    _parent.Children.InsertAtBottom(_visual);
+            }
+
+            public void SetFixedTransform(float offsetX, float offsetY, float width = -1, float height = -1)
+            {
+                if (_visual == null) return;
+
+                if (width < 0) width = LogicalW;
+                if (height < 0) height = LogicalH;
+
+                _visual.Size = new Vector2(width, height);
+                _visual.Offset = new Vector3(offsetX, offsetY, 0f);
+            }
+
+            public void Clear()
+            {
+                if (_visual != null)
+                {
+                    _parent.Children.Remove(_visual);
+                    _visual.Dispose();
+                    _visual = null;
+                }
+                if (_brush != null) { _brush.Dispose(); _brush = null; }
+                if (_surface is IDisposable ds) { ds.Dispose(); }
+                _surface = null;
+            }
+
+            public void Dispose() => Clear();
+        }
 
         [ComImport]
         [Guid("25297D5C-3AD4-4C9C-B5CF-E36A38512330")]
