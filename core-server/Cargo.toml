@@ -14,8 +14,8 @@ name = "core-server"
 path = "src/bin/server.rs"
 
 [[bin]]
-name = "demo-producer"
-path = "src/bin/demo-producer.rs"
+name = "demo-app"
+path = "src/bin/demo-app.rs"
 
 [[bin]]
 name = "demo-consumer"
@@ -37,6 +37,7 @@ windows = { version = "0.59", features = [
     "Win32_Media_MediaFoundation",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
     "Win32_System_Threading",
@@ -62,3 +63,4 @@ tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+proptest = "1.5"

@@ -5,7 +5,7 @@ use windows::Win32::System::Memory::{
 };
 
 /// 共享内存 Ringbuffer 的元数据区域（通常放在 buffer 的最开头）。
-/// 用于 Producer 和 Core 之间同步读写偏移量。
+/// 用于 App 和 Core 之间同步读写偏移量。
 #[repr(C)]
 pub struct RingbufferHeader {
     pub write_offset: u32,

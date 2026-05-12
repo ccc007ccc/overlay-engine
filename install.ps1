@@ -15,7 +15,7 @@
     完成后：
       - 先启动 core-server：.\target\release\core-server.exe
       - 再打开 Xbox Game Bar (Win+G) -> Widget store -> 'Overlay Widget'
-      - 或启动桌面监视器：.\target\release\desktop-window-consumer.exe
+      - 或启动桌面监视器：.\target\release\desktop-window-monitor.exe
     卸载用 .\uninstall.ps1。
 
 .PARAMETER Configuration
@@ -170,7 +170,7 @@ if (-not $SkipRust) {
 
     # 检查关键产物
     $coreServer = Join-Path $ProjectRoot 'target\release\core-server.exe'
-    $desktopConsumer = Join-Path $ProjectRoot 'target\release\desktop-window-consumer.exe'
+    $desktopConsumer = Join-Path $ProjectRoot 'target\release\desktop-window-monitor.exe'
     $rendererDll = Join-Path $ProjectRoot 'target\release\renderer.dll'
 
     $products = @()
@@ -373,4 +373,4 @@ Write-Host "All done." -ForegroundColor Green
 Write-Host "Usage:" -ForegroundColor Cyan
 Write-Host "  1. Start core-server:  .\target\release\core-server.exe" -ForegroundColor White
 Write-Host "  2. Open Game Bar:      Win+G -> Widget store -> 'Overlay Widget'" -ForegroundColor White
-Write-Host "  3. Or desktop monitor: .\target\release\desktop-window-consumer.exe" -ForegroundColor White
+Write-Host "  3. Or desktop monitor: .\target\release\desktop-window-monitor.exe" -ForegroundColor White

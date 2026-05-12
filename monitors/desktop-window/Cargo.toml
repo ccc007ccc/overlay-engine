@@ -10,12 +10,8 @@ name = "desktop_window"
 path = "src/lib.rs"
 
 [[bin]]
-name = "desktop-demo-producer"
-path = "src/bin/producer.rs"
-
-[[bin]]
-name = "desktop-window-consumer"
-path = "src/bin/consumer.rs"
+name = "desktop-window-monitor"
+path = "src/bin/monitor.rs"
 
 [dependencies]
 core-server = { path = "../../core-server" }
@@ -46,3 +42,6 @@ windows-core = "0.59"
 tokio = { version = "1", features = ["full"] }
 bytes = "1.5"
 anyhow = "1.0"
+
+[dev-dependencies]
+proptest = "1.5"

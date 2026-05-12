@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! WIC（Windows Imaging Component）解码包装。
 //!
 //! ## 用途
@@ -37,8 +39,12 @@
 
 use windows::core::Interface;
 use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICBitmapSource,
-    IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapPaletteTypeMedianCut,
+    CLSID_WICImagingFactory,
+    GUID_WICPixelFormat32bppPBGRA,
+    IWICBitmapSource,
+    IWICImagingFactory,
+    WICBitmapDitherTypeNone,
+    WICBitmapPaletteTypeMedianCut,
     WICDecodeMetadataCacheOnLoad,
     // 注：IWICFormatConverter 类型在 CreateFormatConverter() 返回值上靠类型推断
     // 拿到，Initialize 是其 inherent method，不需要把类型名 import 进来。
@@ -64,9 +70,9 @@ impl WicDecoder {
             // （例如 STA），此时不该当致命错误 —— 我们在已 init 线程上跑也行。
             // S_FALSE = 1 ：本线程已 init，不算错。
             if hr.is_err() && hr.0 != 0x80010106u32 as i32 {
-                return Err(RendererError::DeviceInit(windows::core::Error::from_hresult(
-                    hr,
-                )));
+                return Err(RendererError::DeviceInit(
+                    windows::core::Error::from_hresult(hr),
+                ));
             }
         }
 

@@ -32,9 +32,46 @@ const RENDER_DURATION_WINDOW: usize = 60;
 const RENDER_DURATION_WARN_MS: u128 = 8;
 
 pub async fn run_server() -> anyhow::Result<()> {
-    let mut server = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(PIPE_NAME)?;
+    use std::ffi::CString;
+    use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorA, SDDL_REVISION_1};
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+
+    // SDDL meaning:
+    // D: (Discretionary ACL)
+    // (A;;GA;;;WD) -> Allow, Generic All, to Everyone (WD)
+    // (A;;GA;;;AC) -> Allow, Generic All, to All Application Packages (UWP Sandbox) (AC)
+    // This allows UWP apps (like Xbox Game Bar widgets) to connect to this named pipe.
+    let sddl = CString::new("D:(A;;GA;;;WD)(A;;GA;;;AC)").unwrap();
+    let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR::default();
+
+    unsafe {
+        let _ = ConvertStringSecurityDescriptorToSecurityDescriptorA(
+            windows::core::PCSTR(sddl.as_ptr() as *const u8),
+            SDDL_REVISION_1,
+            &mut sd,
+            None,
+        );
+    }
+
+    let mut sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd.0 as *mut _,
+        bInheritHandle: false.into(),
+    };
+
+    let mut server_options = ServerOptions::new();
+    let mut server = unsafe {
+        server_options
+            .first_pipe_instance(true)
+            .create_with_security_attributes_raw(PIPE_NAME, &mut sa as *mut _ as *mut std::ffi::c_void)?
+    };
+
+    // Free the security descriptor buffer allocated by Windows
+    unsafe {
+        if !sd.0.is_null() {
+            windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(sd.0)));
+        }
+    }
 
     println!("Core Server listening on {}", PIPE_NAME);
 
@@ -46,7 +83,32 @@ pub async fn run_server() -> anyhow::Result<()> {
         let connected_client = server;
 
         // Prepare a new pipe instance for the next client
-        server = ServerOptions::new().create(PIPE_NAME)?;
+        // Need to recreate the security attributes for the next pipe instance
+        let mut sd_next: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            let _ = ConvertStringSecurityDescriptorToSecurityDescriptorA(
+                windows::core::PCSTR(sddl.as_ptr() as *const u8),
+                SDDL_REVISION_1,
+                &mut sd_next,
+                None,
+            );
+        }
+        let mut sa_next = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd_next.0 as *mut _,
+            bInheritHandle: false.into(),
+        };
+
+        let next_server_options = ServerOptions::new();
+        server = unsafe {
+            next_server_options.create_with_security_attributes_raw(PIPE_NAME, &mut sa_next as *mut _ as *mut std::ffi::c_void)?
+        };
+
+        unsafe {
+            if !sd_next.0.is_null() {
+                windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(sd_next.0)));
+            }
+        }
 
         // Spawn a new task to handle the connected client
         tokio::spawn(async move {

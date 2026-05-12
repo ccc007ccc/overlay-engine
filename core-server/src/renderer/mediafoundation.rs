@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! v0.7 phase 3：本地视频解码（Media Foundation）
 //!
 //! ## 设计（参考 spec §4.1）
@@ -32,9 +34,9 @@ use windows::Win32::Media::MediaFoundation::{
     MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video, MFStartup,
     MFVideoFormat_RGB32, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
     MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+    MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
     MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
-    MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_VERSION,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Variant::VT_UI8;
@@ -252,9 +254,7 @@ impl VideoSource {
                     Some(&mut timestamp as *mut i64),
                     Some(&mut sample as *mut Option<IMFSample>),
                 )
-                .map_err(|e| {
-                    RendererError::VideoDecodeFail(format!("ReadSample failed: {e}"))
-                })?;
+                .map_err(|e| RendererError::VideoDecodeFail(format!("ReadSample failed: {e}")))?;
         }
 
         // EOS：sample 可能为 None，flags 含 ENDOFSTREAM
@@ -280,9 +280,9 @@ impl VideoSource {
 
         // sample → contiguous IMFMediaBuffer
         let buffer: IMFMediaBuffer = unsafe {
-            sample
-                .ConvertToContiguousBuffer()
-                .map_err(|e| RendererError::VideoDecodeFail(format!("ConvertToContiguousBuffer: {e}")))?
+            sample.ConvertToContiguousBuffer().map_err(|e| {
+                RendererError::VideoDecodeFail(format!("ConvertToContiguousBuffer: {e}"))
+            })?
         };
 
         // Lock → memcpy → Unlock。

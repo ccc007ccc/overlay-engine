@@ -13,7 +13,10 @@ async fn main() -> anyhow::Result<()> {
     let mut client = loop {
         match ClientOptions::new().open(PIPE_NAME) {
             Ok(client) => break client,
-            Err(e) if e.raw_os_error() == Some(windows::Win32::Foundation::ERROR_PIPE_BUSY.0 as i32) => {
+            Err(e)
+                if e.raw_os_error()
+                    == Some(windows::Win32::Foundation::ERROR_PIPE_BUSY.0 as i32) =>
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 continue;
             }
@@ -23,13 +26,15 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Connected!");
 
-    // Send RegisterConsumer message
-    let msg = ControlMessage::RegisterConsumer { pid: std::process::id() };
+    // Send RegisterMonitor message
+    let msg = ControlMessage::RegisterMonitor {
+        pid: std::process::id(),
+    };
     let mut buf = BytesMut::new();
     msg.encode(&mut buf);
 
     client.write_all(&buf).await?;
-    println!("Sent RegisterConsumer");
+    println!("Sent RegisterMonitor");
 
     let mut buf = BytesMut::with_capacity(1024);
 
@@ -57,10 +62,25 @@ async fn main() -> anyhow::Result<()> {
             buf.extend_from_slice(&payload_buf);
         }
 
-        let msg = ControlMessage::decode(header.opcode, &mut buf)?;
-        println!("Received message: {:?}", msg);
-
-        if let ControlMessage::CanvasAttached { canvas_id, surface_handle, logical_w, logical_h, render_w, render_h } = msg {
+        let msg = match ControlMessage::decode(header.opcode, header.payload_len, &mut buf)? {
+            Some(m) => m,
+            None => {
+                // Unknown opcode (e.g. `OP_MONITOR_LOCAL_SURFACE_ATTACHED`
+                // sent by a newer Core). decode() already skipped the
+                // payload bytes and logged the warning. Keep the loop
+                // going so we continue to receive CanvasAttached.
+                continue;
+            }
+        };
+        if let ControlMessage::CanvasAttached {
+            canvas_id,
+            surface_handle,
+            logical_w,
+            logical_h,
+            render_w,
+            render_h,
+        } = msg
+        {
             println!("==> Canvas Attached!");
             println!("    ID: {}", canvas_id);
             println!("    Handle: {:#x}", surface_handle);

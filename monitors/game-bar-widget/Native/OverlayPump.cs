@@ -180,7 +180,8 @@ namespace OverlayWidget.Native
 
                     _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
                     {
-                        MountWorldSurface(new IntPtr(handleRaw), logW, logH);
+                        try { MountWorldSurface(new IntPtr(handleRaw), logW, logH); }
+                        catch (Exception ex) { Debug.WriteLine($"[OverlayPump] MountWorldSurface threw: {ex}"); }
                     });
                     break;
                 }
@@ -193,13 +194,17 @@ namespace OverlayWidget.Native
 
                     _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
                     {
-                        MountMonitorLocalSurface(new IntPtr(handleRaw), logW, logH);
+                        try { MountMonitorLocalSurface(new IntPtr(handleRaw), logW, logH); }
+                        catch (Exception ex) { Debug.WriteLine($"[OverlayPump] MountMonitorLocalSurface threw: {ex}"); }
                     });
                     break;
                 }
                 case OP_APP_DETACHED:
                 {
-                    _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, ClearSurfaces);
+                    _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
+                    {
+                        try { ClearSurfaces(); } catch { }
+                    });
                     break;
                 }
                 default:
@@ -382,13 +387,21 @@ namespace OverlayWidget.Native
         public void Dispose() => Stop();
 
         [ComImport]
-        [Guid("29E691FA-4567-4DCA-B319-D0F207EB6807")]
+        [Guid("25297D5C-3AD4-4C9C-B5CF-E36A38512330")]
         [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         public interface ICompositorInterop
         {
-            void CreateCompositionSurfaceForHandle(IntPtr swapChain, out object surface);
-            void CreateCompositionSurfaceForSwapChain(IntPtr swapChain, out object surface);
-            void CreateGraphicsDevice(IntPtr renderingDevice, out object device);
+            void CreateCompositionSurfaceForHandle(
+                IntPtr swapChainHandle,
+                [MarshalAs(UnmanagedType.IInspectable)] out object surface);
+
+            void CreateCompositionSurfaceForSwapChain(
+                IntPtr swapChain,
+                [MarshalAs(UnmanagedType.IInspectable)] out object surface);
+
+            void CreateGraphicsDevice(
+                IntPtr renderingDevice,
+                [MarshalAs(UnmanagedType.IInspectable)] out object device);
         }
     }
 }

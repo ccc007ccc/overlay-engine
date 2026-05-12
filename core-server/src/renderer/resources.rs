@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! v0.7 phase 2 资源系统 —— u32 BitmapHandle + slot table + ABA 防护。
 //!
 //! ## 设计目标（决策 spec 第 3 节 + 10.4）
@@ -172,8 +174,7 @@ impl<T> ResourceTable<T> {
         match slot {
             SlotState::Used { generation, .. } if *generation == gen_ => {
                 // 不能直接 take —— SlotState::Used 不是 Option。先 swap 出去。
-                let taken =
-                    std::mem::replace(slot, SlotState::Empty { generation: 0 });
+                let taken = std::mem::replace(slot, SlotState::Empty { generation: 0 });
                 let (taken_gen, value) = match taken {
                     SlotState::Used { generation, value } => (generation, value),
                     _ => unreachable!(),
@@ -215,10 +216,7 @@ mod tests {
         assert_eq!(*t.get(h).unwrap(), 42);
         let v = t.remove(h).unwrap();
         assert_eq!(v, 42);
-        assert!(matches!(
-            t.get(h),
-            Err(RendererError::ResourceNotFound)
-        ));
+        assert!(matches!(t.get(h), Err(RendererError::ResourceNotFound)));
     }
 
     #[test]
@@ -230,10 +228,7 @@ mod tests {
         let h2 = t.insert(2).unwrap();
         assert_ne!(h1, h2, "ABA: reused slot must produce different handle");
         // 老句柄查询应失败
-        assert!(matches!(
-            t.get(h1),
-            Err(RendererError::ResourceNotFound)
-        ));
+        assert!(matches!(t.get(h1), Err(RendererError::ResourceNotFound)));
         // 新句柄查询应成功
         assert_eq!(*t.get(h2).unwrap(), 2);
     }
@@ -254,10 +249,7 @@ mod tests {
             assert_ne!(h, 0);
         }
         // 第 1025 个应失败
-        assert!(matches!(
-            t.insert(9999),
-            Err(RendererError::ResourceLimit)
-        ));
+        assert!(matches!(t.insert(9999), Err(RendererError::ResourceLimit)));
         assert_eq!(t.allocated_count(), BITMAP_SLOT_CAPACITY);
     }
 
@@ -281,9 +273,6 @@ mod tests {
         let mut t: ResourceTable<i32> = ResourceTable::new();
         let h = t.insert(1).unwrap();
         assert_eq!(t.remove(h).unwrap(), 1);
-        assert!(matches!(
-            t.remove(h),
-            Err(RendererError::ResourceNotFound)
-        ));
+        assert!(matches!(t.remove(h), Err(RendererError::ResourceNotFound)));
     }
 }
