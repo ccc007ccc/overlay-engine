@@ -71,9 +71,7 @@
     <Compile Include="MainWidget.xaml.cs">
       <DependentUpon>MainWidget.xaml</DependentUpon>
     </Compile>
-    <Compile Include="Native\CompositionPump.cs" />
-    <Compile Include="Native\ExternalSurfacePump.cs" />
-    <Compile Include="Native\RendererPInvoke.cs" />
+    <Compile Include="Native\OverlayPump.cs" />
     <Compile Include="Native\ScreenInterop.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
@@ -105,18 +103,6 @@
   <ItemGroup>
     <PRIResource Include="Strings\en-US\Resources.resw" />
     <PRIResource Include="Strings\zh-CN\Resources.resw" />
-  </ItemGroup>
-
-  <!-- ============== Rust 渲染 DLL（C3 启用） ==============
-       MSIX 包根会拷贝 renderer.dll，UWP 加载器查找规则会自动找到。
-       要求：先在 workspace 根用 release profile 编过 renderer crate。
-       cargo workspace 输出在 workspace root 的 target/，不再是 rust-renderer/target/
-       （v0.6 单 crate 时是后者；自 v0.7 启用 workspace 后必须用前者）。 -->
-  <ItemGroup>
-    <Content Include="..\..\target\release\renderer.dll">
-      <Link>renderer.dll</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
   </ItemGroup>
 
   <!-- ============== 静态资源 ============== -->
