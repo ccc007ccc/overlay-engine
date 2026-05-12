@@ -24,7 +24,7 @@ use windows::Win32::Graphics::Dxgi::{
     IDXGIAdapter, IDXGIDevice, DXGI_ERROR_DEVICE_HUNG, DXGI_ERROR_DEVICE_REMOVED,
     DXGI_ERROR_DEVICE_RESET,
 };
-use windows::Win32::System::Threading::WaitForMultipleObjects;
+use windows::Win32::System::Threading::WaitForMultipleObjectsEx;
 
 pub const COMPOSITIONOBJECT_ALL_ACCESS: u32 = 0x0003;
 
@@ -256,7 +256,21 @@ impl CanvasResources {
             }
         }
 
-        let wait_result = unsafe { WaitForMultipleObjects(&events, false, timeout_ms) };
+        // Set bAlertable to true.
+        // If DWM hasn't recycled our buffer yet, we must allow its Present
+        // Completion APCs to execute during our wait. If we block without
+        // being alertable, the buffer might never become signaled.
+        let wait_result = unsafe { WaitForMultipleObjectsEx(&events, false, timeout_ms, true) };
+
+        if wait_result == windows::Win32::Foundation::WAIT_IO_COMPLETION {
+            // An APC ran. The buffer might now be available, so check again with 0 timeout.
+            let retry = unsafe { WaitForMultipleObjectsEx(&events, false, 0, false) };
+            let base = WAIT_OBJECT_0.0;
+            if retry.0 >= base && retry.0 < base + events.len() as u32 {
+                return AcquireOutcome::Acquired((retry.0 - base) as usize);
+            }
+            return AcquireOutcome::TimedOut;
+        }
 
         if wait_result == WAIT_TIMEOUT {
             return AcquireOutcome::TimedOut;
@@ -507,7 +521,16 @@ impl PerMonitorResources {
             }
         }
 
-        let wait_result = unsafe { WaitForMultipleObjects(&events, false, timeout_ms) };
+        let wait_result = unsafe { WaitForMultipleObjectsEx(&events, false, timeout_ms, true) };
+
+        if wait_result == windows::Win32::Foundation::WAIT_IO_COMPLETION {
+            let retry = unsafe { WaitForMultipleObjectsEx(&events, false, 0, false) };
+            let base = WAIT_OBJECT_0.0;
+            if retry.0 >= base && retry.0 < base + events.len() as u32 {
+                return AcquireOutcome::Acquired((retry.0 - base) as usize);
+            }
+            return AcquireOutcome::TimedOut;
+        }
 
         if wait_result == WAIT_TIMEOUT {
             return AcquireOutcome::TimedOut;

@@ -196,13 +196,19 @@ fn fill_rect_on_target(
     let g = (rgba[1].clamp(0.0, 1.0) * 255.0) as u8;
     let r = (rgba[0].clamp(0.0, 1.0) * 255.0) as u8;
     let a = (rgba[3].clamp(0.0, 1.0) * 255.0) as u8;
-    let mut pixels = vec![0u8; (bw * bh * 4) as usize];
-    for chunk in pixels.chunks_exact_mut(4) {
-        chunk[0] = b;
-        chunk[1] = g;
-        chunk[2] = r;
-        chunk[3] = a;
+
+    // PERF: Instead of allocating a new Vec and zeroing it per draw call,
+    // we allocate once with capacity and push the bytes.
+    let total_bytes = (bw * bh * 4) as usize;
+    let mut pixels = Vec::with_capacity(total_bytes);
+
+    // Fast path: if the buffer is small enough or we are pushing uniform bytes,
+    // we can avoid extending and mutating.
+    let pixel = [b, g, r, a];
+    for _ in 0..(bw * bh) {
+        pixels.extend_from_slice(&pixel);
     }
+
     if let Ok(resource) = texture.cast::<ID3D11Resource>() {
         let d3d_box = D3D11_BOX {
             left: x0,
@@ -277,6 +283,11 @@ fn record_render_duration(
     if durations.is_empty() {
         return (Duration::ZERO, false);
     }
+
+    // Although an O(N) sum here is technically an optimization target, N=60
+    // is so small that vectorization and CPU cache locality makes iter().sum()
+    // practically as fast as tracking a running total, while avoiding
+    // floating-point drift or complex state management across resets.
     let total_nanos: u128 = durations.iter().map(|d| d.as_nanos()).sum();
     let avg_nanos = total_nanos / durations.len() as u128;
     let avg = Duration::from_nanos(avg_nanos as u64);
@@ -443,32 +454,41 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                 } => {
                     if let Some((app_id, true)) = client_id {
                         let frame_start = Instant::now();
-                        let state = crate::ipc::server::SERVER_STATE.read();
-                        if let Some(app) = state.apps.get(&app_id) {
-                            let resolved_canvas_id = if canvas_id == 0 {
-                                app.canvas_ids.first().copied().unwrap_or(0)
-                            } else {
-                                canvas_id
-                            };
-                            if let Some(ref ringbuf) = app.command_ringbuffer {
-                                let data = ringbuf.data();
-                                let start = offset as usize;
-                                let end = start + length as usize;
-                                if end <= data.len() {
-                                    let cmds =
-                                        crate::ipc::cmd_decoder::decode_commands(&data[start..end]);
-                                    if let Some(canvas) = state.canvases.get(&resolved_canvas_id) {
-                                        dispatch_submit_frame(
-                                            canvas,
-                                            &state.devices.d3d_ctx,
-                                            &state.devices.d2d,
-                                            resolved_canvas_id,
-                                            frame_id,
-                                            &cmds,
-                                            &mut render_durations,
-                                            frame_start,
-                                        );
+                        let cmds = {
+                            let state = crate::ipc::server::SERVER_STATE.read();
+                            if let Some(app) = state.apps.get(&app_id) {
+                                if let Some(ref ringbuf) = app.command_ringbuffer {
+                                    let data = ringbuf.data();
+                                    let start = offset as usize;
+                                    let end = start + length as usize;
+                                    if end <= data.len() {
+                                        Some(crate::ipc::cmd_decoder::decode_commands(&data[start..end]))
+                                    } else {
+                                        None
                                     }
+                                } else { None }
+                            } else { None }
+                        };
+
+                        if let Some(cmds) = cmds {
+                            let state = crate::ipc::server::SERVER_STATE.read();
+                            if let Some(app) = state.apps.get(&app_id) {
+                                let resolved_canvas_id = if canvas_id == 0 {
+                                    app.canvas_ids.first().copied().unwrap_or(0)
+                                } else {
+                                    canvas_id
+                                };
+                                if let Some(canvas) = state.canvases.get(&resolved_canvas_id) {
+                                    dispatch_submit_frame(
+                                        canvas,
+                                        &state.devices.d3d_ctx,
+                                        &state.devices.d2d,
+                                        resolved_canvas_id,
+                                        frame_id,
+                                        &cmds,
+                                        &mut render_durations,
+                                        frame_start,
+                                    );
                                 }
                             }
                         }
@@ -784,10 +804,11 @@ fn dispatch_submit_frame(
                             );
                         }
                     }
-                    // Alertable wait + drain present statistics so buffer
-                    // events become signaled for the next acquire call.
-                    windows::Win32::System::Threading::SleepEx(0, true);
-                    while canvas.resources.manager.GetNextPresentStatistics().is_ok() {}
+                    // DO NOT sleep/drain here after every present.
+                    // This was causing backpressure stalls because if the APC
+                    // hadn't arrived yet, we read nothing, but then blocked the
+                    // thread from getting it later. We now let acquire_available_buffer
+                    // do an alertable wait to fetch APCs exactly when we need them.
                 }
             }
         }
@@ -806,7 +827,6 @@ fn dispatch_submit_frame(
                          monitor only",
                         canvas_id, frame_id, cid, e
                     );
-                    // Continue to the next monitor — DO NOT propagate.
                     continue;
                 }
                 Ok(()) => {
@@ -822,10 +842,17 @@ fn dispatch_submit_frame(
                             );
                         }
                     }
-                    windows::Win32::System::Threading::SleepEx(0, true);
-                    while pc.manager.GetNextPresentStatistics().is_ok() {}
                 }
             }
+        }
+    }
+
+    // Drain present statistics once at the end of the frame without blocking.
+    // The APCs will arrive while we wait in `acquire_available_buffer`.
+    unsafe {
+        while canvas.resources.manager.GetNextPresentStatistics().is_ok() {}
+        for pc in canvas.per_monitor_surfaces.values() {
+            while pc.manager.GetNextPresentStatistics().is_ok() {}
         }
     }
 

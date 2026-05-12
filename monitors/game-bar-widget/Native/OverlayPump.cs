@@ -100,10 +100,10 @@ namespace OverlayWidget.Native
                         if (!await ReadExactAsync(_pipeStream, headerBuf, 12, token))
                             break; // Connection lost
 
-                        uint magic = BitConverter.ToUInt32(headerBuf, 0);
-                        ushort version = BitConverter.ToUInt16(headerBuf, 4);
-                        ushort opcode = BitConverter.ToUInt16(headerBuf, 6);
-                        uint payloadLen = BitConverter.ToUInt32(headerBuf, 8);
+                        uint magic = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(headerBuf.AsSpan(0));
+                        ushort version = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(headerBuf.AsSpan(4));
+                        ushort opcode = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(headerBuf.AsSpan(6));
+                        uint payloadLen = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(headerBuf.AsSpan(8));
 
                         if (magic != IPC_MAGIC) break;
 
@@ -151,9 +151,9 @@ namespace OverlayWidget.Native
                 case IpcOpcode.CanvasAttached:
                 {
                     if (payloadLen < 28) break;
-                    long handleRaw = unchecked((long)BitConverter.ToUInt64(payload, 4));
-                    uint logW = BitConverter.ToUInt32(payload, 12);
-                    uint logH = BitConverter.ToUInt32(payload, 16);
+                    long handleRaw = unchecked((long)System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(payload.AsSpan(4)));
+                    uint logW = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(12));
+                    uint logH = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(16));
 
                     _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
                     {
@@ -170,9 +170,9 @@ namespace OverlayWidget.Native
                 case IpcOpcode.MonitorLocalAttached:
                 {
                     if (payloadLen < 24) break;
-                    long handleRaw = unchecked((long)BitConverter.ToUInt64(payload, 8));
-                    uint logW = BitConverter.ToUInt32(payload, 16);
-                    uint logH = BitConverter.ToUInt32(payload, 20);
+                    long handleRaw = unchecked((long)System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(payload.AsSpan(8)));
+                    uint logW = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(16));
+                    uint logH = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(20));
 
                     _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
                     {
@@ -262,17 +262,25 @@ namespace OverlayWidget.Native
         private static async Task WriteIpcMessageAsync(NamedPipeClientStream stream, IpcOpcode opcode, byte[] payload, CancellationToken token)
         {
             int headerSize = 12;
-            byte[] msg = new byte[headerSize + (payload?.Length ?? 0)];
-            BitConverter.GetBytes(IPC_MAGIC).CopyTo(msg, 0);
-            BitConverter.GetBytes(IPC_VERSION).CopyTo(msg, 4);
-            BitConverter.GetBytes((ushort)opcode).CopyTo(msg, 6);
-            BitConverter.GetBytes((uint)(payload?.Length ?? 0)).CopyTo(msg, 8);
+            byte[] msg = System.Buffers.ArrayPool<byte>.Shared.Rent(headerSize + (payload?.Length ?? 0));
+            try
+            {
+                Span<byte> span = msg.AsSpan();
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(0), IPC_MAGIC);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(4), IPC_VERSION);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(span.Slice(6), (ushort)opcode);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(8), (uint)(payload?.Length ?? 0));
 
-            if (payload != null && payload.Length > 0)
-                Buffer.BlockCopy(payload, 0, msg, headerSize, payload.Length);
+                if (payload != null && payload.Length > 0)
+                    payload.AsSpan().CopyTo(span.Slice(12));
 
-            await stream.WriteAsync(msg, 0, msg.Length, token);
-            await stream.FlushAsync(token);
+                await stream.WriteAsync(msg, 0, headerSize + (payload?.Length ?? 0), token);
+                await stream.FlushAsync(token);
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(msg);
+            }
         }
 
         private static async Task<bool> ReadExactAsync(NamedPipeClientStream stream, byte[] buf, int count, CancellationToken token)
