@@ -1,0 +1,255 @@
+warning: struct `VideoInfo` is never constructed
+  --> core-server\src\renderer\mediafoundation.rs:47:19
+   |
+47 | pub(crate) struct VideoInfo {
+   |                   ^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `VideoSource` is never constructed
+  --> core-server\src\renderer\mediafoundation.rs:59:19
+   |
+59 | pub(crate) struct VideoSource {
+   |                   ^^^^^^^^^^^
+
+warning: static `MF_STARTUP` is never used
+  --> core-server\src\renderer\mediafoundation.rs:77:8
+   |
+77 | static MF_STARTUP: OnceLock<windows::core::Result<()>> = OnceLock::new();
+   |        ^^^^^^^^^^
+
+warning: function `ensure_mf_startup` is never used
+  --> core-server\src\renderer\mediafoundation.rs:79:4
+   |
+79 | fn ensure_mf_startup() -> RendererResult<()> {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: function `ticks_100ns_to_ms_u64` is never used
+  --> core-server\src\renderer\mediafoundation.rs:97:4
+   |
+97 | fn ticks_100ns_to_ms_u64(ticks: u64) -> u64 {
+   |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `ms_to_ticks_100ns` is never used
+   --> core-server\src\renderer\mediafoundation.rs:101:4
+    |
+101 | fn ms_to_ticks_100ns(ms: u64) -> i64 {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: associated items `open_file`, `info`, `seek`, and `read_next_frame` are never used
+   --> core-server\src\renderer\mediafoundation.rs:110:19
+    |
+105 | impl VideoSource {
+    | ---------------- associated items in this implementation
+...
+110 |     pub(crate) fn open_file(path: &str, bitmap: BitmapHandle) -> Rende...
+    |                   ^^^^^^^^^
+...
+207 |     pub(crate) fn info(&self) -> VideoInfo {
+    |                   ^^^^
+...
+212 |     pub(crate) fn seek(&mut self, time_ms: u64) -> RendererResult<()> {
+    |                   ^^^^
+...
+232 |     pub(crate) fn read_next_frame(&mut self) -> RendererResult<(&[u8],...
+    |                   ^^^^^^^^^^^^^^^
+
+warning: function `read_frame_size` is never used
+   --> core-server\src\renderer\mediafoundation.rs:331:4
+    |
+331 | fn read_frame_size(mt: &IMFMediaType) -> RendererResult<(u32, u32)> {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `read_frame_rate` is never used
+   --> core-server\src\renderer\mediafoundation.rs:348:4
+    |
+348 | fn read_frame_rate(mt: &IMFMediaType) -> Option<(u32, u32)> {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `read_duration_ms` is never used
+   --> core-server\src\renderer\mediafoundation.rs:361:4
+    |
+361 | fn read_duration_ms(reader: &IMFSourceReader) -> Option<u64> {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `make_propvariant_u8` is never used
+   --> core-server\src\renderer\mediafoundation.rs:374:4
+    |
+374 | fn make_propvariant_u8(ticks: u64) -> PROPVARIANT {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: fields `width`, `height`, and `updatable` are never read
+   --> core-server\src\renderer\painter.rs:167:9
+    |
+165 | pub(crate) struct BitmapResource {
+    |                   -------------- fields in this struct
+166 |     pub bitmap: ID2D1Bitmap1,
+167 |     pub width: u32,
+    |         ^^^^^
+168 |     pub height: u32,
+    |         ^^^^^^
+...
+171 |     pub updatable: bool,
+    |         ^^^^^^^^^
+
+warning: field `wic` is never read
+   --> core-server\src\renderer\painter.rs:196:5
+    |
+175 | pub(crate) struct D2DEngine {
+    |                   --------- field in this struct
+...
+196 |     wic: WicDecoder,
+    |     ^^^
+
+warning: multiple associated items are never used
+   --> core-server\src\renderer\painter.rs:208:19
+    |
+207 | impl D2DEngine {
+    | -------------- associated items in this implementation
+208 |     pub(crate) fn create(d3d11_device: &ID3D11Device) -> RendererResul...
+    |                   ^^^^^^
+...
+259 |     pub(crate) fn create_target_bitmap(
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+417 |     pub(crate) fn load_bitmap_from_memory(&self, bytes: &[u8]) -> Rend...
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+451 |     pub(crate) fn create_texture(
+    |                   ^^^^^^^^^^^^^^
+...
+502 |     pub(crate) fn update_texture(
+    |                   ^^^^^^^^^^^^^^
+...
+582 |     pub(crate) fn get_bitmap_size(&self, h: BitmapHandle) -> RendererR...
+    |                   ^^^^^^^^^^^^^^^
+...
+589 |     pub(crate) fn destroy_bitmap(&self, h: BitmapHandle) -> RendererRe...
+    |                   ^^^^^^^^^^^^^^
+
+warning: function `swizzle_rgba_to_bgra` is never used
+   --> core-server\src\renderer\painter.rs:598:4
+    |
+598 | fn swizzle_rgba_to_bgra(bytes: &[u8], width: u32, height: u32, stride:...
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new` and `set_viewport_origin` are never used
+   --> core-server\src\renderer\painter.rs:634:19
+    |
+633 | impl<'a> Painter<'a> {
+    | -------------------- associated items in this implementation
+634 |     pub(crate) fn new(engine: &'a D2DEngine, size: (u32, u32)) -> Self {
+    |                   ^^^
+...
+644 |     pub(crate) fn set_viewport_origin(&mut self, vx: f32, vy: f32) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BITMAP_SLOT_CAPACITY` is never used
+  --> core-server\src\renderer\resources.rs:31:18
+   |
+31 | pub(crate) const BITMAP_SLOT_CAPACITY: usize = 1024;
+   |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `make_handle` is never used
+  --> core-server\src\renderer\resources.rs:46:4
+   |
+46 | fn make_handle(index: u16, generation: u16) -> BitmapHandle {
+   |    ^^^^^^^^^^^
+
+warning: variants `Empty` and `Used` are never constructed
+  --> core-server\src\renderer\resources.rs:52:5
+   |
+51 | enum SlotState<T> {
+   |      --------- variants in this enum
+52 |     Empty { generation: u16 },
+   |     ^^^^^
+53 |     Used { generation: u16, value: T },
+   |     ^^^^
+
+warning: method `generation` is never used
+  --> core-server\src\renderer\resources.rs:57:8
+   |
+56 | impl<T> SlotState<T> {
+   | -------------------- method in this implementation
+57 |     fn generation(&self) -> u16 {
+   |        ^^^^^^^^^^
+
+warning: fields `free_list` and `next_fresh` are never read
+  --> core-server\src\renderer\resources.rs:72:5
+   |
+67 | pub(crate) struct ResourceTable<T> {
+   |                   ------------- fields in this struct
+...
+72 |     free_list: Vec<u16>,
+   |     ^^^^^^^^^
+73 |     /// 下一个从未分配过的 slot index。free_list 空时从这里取。
+74 |     next_fresh: u16,
+   |     ^^^^^^^^^^
+
+warning: associated items `new`, `insert`, `get_mut`, and `remove` are never used
+   --> core-server\src\renderer\resources.rs:78:19
+    |
+ 77 | impl<T> ResourceTable<T> {
+    | ------------------------ associated items in this implementation
+ 78 |     pub(crate) fn new() -> Self {
+    |                   ^^^
+...
+ 91 |     pub(crate) fn insert(&mut self, value: T) -> RendererResult<Bitmap...
+    |                   ^^^^^^
+...
+126 |     pub(crate) fn get_mut(&mut self, h: BitmapHandle) -> RendererResul...
+    |                   ^^^^^^^
+...
+163 |     pub(crate) fn remove(&mut self, h: BitmapHandle) -> RendererResult...
+    |                   ^^^^^^
+
+warning: field `factory` is never read
+  --> core-server\src\renderer\wic.rs:54:5
+   |
+53 | pub(crate) struct WicDecoder {
+   |                   ---------- field in this struct
+54 |     factory: IWICImagingFactory,
+   |     ^^^^^^^
+
+warning: associated items `create` and `decode_to_pbgra` are never used
+  --> core-server\src\renderer\wic.rs:58:19
+   |
+57 | impl WicDecoder {
+   | --------------- associated items in this implementation
+58 |     pub(crate) fn create() -> RendererResult<Self> {
+   |                   ^^^^^^
+...
+85 |     pub(crate) fn decode_to_pbgra(&self, bytes: &[u8]) -> RendererResul...
+   |                   ^^^^^^^^^^^^^^^
+
+warning: `core-server` (lib) generated 24 warnings
+warning: `core-server` (lib) generated 24 warnings (24 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests\preservation.rs (target\debug\deps\preservation-3395ac82ae09ab6f.exe)
+
+running 22 tests
+test pbt_a_oracle_capture_control_plane_bytes ... ok
+test pbt_a_prime_monitor_local_surface_attached_roundtrip ... ok
+test pbt_a_prime_oracle_capture_monitor_local_surface_attached ... ok
+test pbt_a_prime_unknown_opcode_is_skipped_not_fatal ... ok
+test pbt_a_random_control_message_roundtrip_bit_identical ... ok
+test pbt_b_oracle_capture_world_only_pixel_hashes ... ok
+test pbt_b_world_stream_pixel_hash_is_deterministic ... ok
+test pbt_c_oracle_capture_high_rate_bounds ... ok
+test pbt_c_submit_interval_and_duration_have_bounded_state ... ok
+test pbt_d_multi_consumer_up_down_sequences_preserve_independence ... ok
+test pbt_d_oracle_capture_multi_consumer_invariants ... ok
+test pbt_preservation_oracle_capture_desktop_window_trace ... ok
+test unit_preservation_all_8_opcodes_in_one_stream ... ok
+test unit_preservation_clear_decodes_unchanged ... ok
+test unit_preservation_draw_line_decodes_unchanged ... ok
+test unit_preservation_fill_ellipse_decodes_unchanged ... ok
+test unit_preservation_fill_rect_decodes_unchanged ... ok
+test unit_preservation_fill_rounded_rect_decodes_unchanged ... ok
+test unit_preservation_opcode_table_is_consistent ... ok
+test unit_preservation_stroke_ellipse_decodes_unchanged ... ok
+test unit_preservation_stroke_rect_decodes_unchanged ... ok
+test unit_preservation_stroke_rounded_rect_decodes_unchanged ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s
+

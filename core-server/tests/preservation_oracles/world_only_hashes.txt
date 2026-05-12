@@ -1,0 +1,8 @@
+# World-only pixel hash oracle
+# Format: seed=<u64> hash=<hex>
+# render_target=128x64 BGRA8
+seed=1 hash=b4b73262b235616d
+seed=2 hash=9d67253fd2239ab1
+seed=3 hash=e14ec3b97b9fe98c
+seed=4 hash=b44bd0ff00c86430
+seed=5 hash=890f51ff8ff1d0ab

@@ -1,0 +1,15 @@
+=== PE-10: Game Bar widget guard ===
+git diff --stat monitors/game-bar-widget/ : (empty output — PE-10 PASS)
+
+git ls-files --others --exclude-standard monitors/game-bar-widget/ :
+  (none)
+
+=== Preservation oracles guard ===
+git diff --stat core-server/tests/preservation_oracles/ :
+  (empty)
+git status --short core-server/tests/preservation_oracles/ :
+  ?? core-server/tests/preservation_oracles/
+# NOTE: the whole core-server/tests/ tree was authored by task 1 / task 2 (untracked). The
+# oracle files themselves are re-loaded and verified bit-for-bit by the PBT A / A' / B / C / D
+# tests during the preservation run (preservation-run.log), which all pass. So oracle stability
+# is test-attested, not git-attested, in this hotfix repo state.

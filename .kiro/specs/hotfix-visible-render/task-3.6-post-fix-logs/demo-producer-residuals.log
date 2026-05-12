@@ -1,0 +1,27 @@
+=== Task 3.3 verification: 'demo-producer' residuals in post-fix source ===
+Scope: code, configs, docs (excluding ./target/ build artifacts and ./.kiro/ spec files)
+
+  core-server\tests\hotfix_visible_render_exploration.rs                   11
+  monitors\desktop-window\Cargo.toml                                        2
+  monitors\desktop-window\README.md                                         3
+  monitors\desktop-window\src\bin\producer.rs                               1
+
+=== Interpretation ===
+All remaining 'demo-producer' matches are **intentional** per task 3.1 / 3.3:
+
+  * monitors/desktop-window/Cargo.toml
+      Change-A (task 3.1) explicitly says 'Leave the desktop-demo-producer [[bin]] entry
+      untouched; add a single-line comment ... rename desktop-demo-producer -> desktop-demo-app'.
+      The [[bin]] entry + TODO comment are both present, as specified.
+
+  * monitors/desktop-window/README.md  +  monitors/desktop-window/src/bin/producer.rs
+      These describe the 'desktop-demo-producer' binary (producer-side test app), whose
+      rename is scoped to the canvas-monitor-lifecycle spec, not this hotfix.
+
+  * core-server/tests/hotfix_visible_render_exploration.rs
+      Task 1's exploration test encodes isBugCondition_rename by asserting the old path
+      core-server/src/bin/demo-producer.rs does NOT exist and the old cargo bin name is gone.
+      The literal 'demo-producer' strings here are the bug-condition predicate, not a leftover.
+
+In the target scope of Change-C (core-server/**  excl. tests/), there are ZERO 'demo-producer'
+matches, which is the rename-completeness guarantee task 3.3 required.

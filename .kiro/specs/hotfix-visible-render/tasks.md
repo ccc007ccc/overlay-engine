@@ -1,0 +1,152 @@
+# Implementation Plan
+
+- [x] 1. Write bug condition exploration test (BEFORE implementing fix)
+  - **Property 1: Bug Condition** - Hotfix Visible Render (Doc / Title / Rename / MonitorLocal-Invisible)
+  - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the four sub-defects exist
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior (Properties 1/2/3/4 from design.md §Correctness Properties) — it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate `isBugCondition_doc`, `isBugCondition_title`, `isBugCondition_rename`, and `isBugCondition_visible` each hold on unfixed code; for 1.4, ALSO execute the H1–H5 hypothesis probes from design.md §Hypothesized Root Cause so that the root cause can be named before task 3.4 implements the fix
+  - **Scoped PBT Approach**: All four sub-defects are deterministic given their inputs, so scope the property to concrete failing cases for reproducibility; use `proptest` only where an input domain is naturally wide (e.g. `isBugCondition_visible` over varied consumer window client sizes / screen positions), and use scoped literal inputs for `_doc` / `_title` / `_rename` whose bug condition is statically judged
+  - **Sub-property 1a — isBugCondition_doc (缺陷 1.1, static)**:
+    - Assert `cargo metadata` on `monitors/desktop-window/Cargo.toml` does NOT list a bin named `desktop-window-monitor` (the name the doc expects), AND the `END-TO-END-TESTING.md` file still contains the string `cargo run -p desktop-window-monitor --bin consumer` OR `cargo run -p desktop-window-monitor --bin desktop-window-consumer`
+    - **EXPECTED OUTCOME on unfixed code**: Assertion FAILS — the doc references a bin the workspace does not expose under the name the doc claims (counterexample: pasting the documented command into a shell yields `error: no bin target named 'consumer'`)
+  - **Sub-property 1b — isBugCondition_title (缺陷 1.2, static + runtime)**:
+    - Static part: `rg -n SetWindowTextW monitors/desktop-window/` returns zero matches in unfixed code
+    - Runtime part (integration, gated on Windows + interactive DWM): launch `desktop-window-monitor` consumer, drive a stub `CanvasAttached` + `MonitorLocalSurfaceAttached` through the pipe, then observe the HWND title via `GetWindowTextW` AT LEAST one refresh period after attach; assert the title still contains `"connecting..."` on unfixed code; then kill the stub producer's pipe and assert the title STILL contains `"connecting..."` (no reconnecting transition)
+    - **EXPECTED OUTCOME on unfixed code**: Both static and runtime assertions FAIL — counterexample is `(attach_received_at=t0, title_at_t0+16ms="Desktop Monitor - connecting...", pipe_disconnect_at=t1, title_at_t1+16ms="Desktop Monitor - connecting...")`
+  - **Sub-property 1c — isBugCondition_rename (缺陷 1.3, static)**:
+    - Assert `core-server/src/bin/demo-producer.rs` exists (file path probe), AND `core-server/Cargo.toml` contains `name = "demo-producer"` in a `[[bin]]` entry, AND `core-server/src/bin/demo-app.rs` does NOT exist
+    - **EXPECTED OUTCOME on unfixed code**: Assertion FAILS — old "producer" naming still present in the bin file path and Cargo binding
+  - **Sub-property 1d — isBugCondition_visible (缺陷 1.4, end-to-end + H1–H5 probes)**:
+    - **Setup**: per `END-TO-END-TESTING.md` (using current, unfixed, bin names), spin up `core-server` + 2 `desktop-window-consumer` windows placed at distinct screen origins (neither at screen `(10, 10)`) + `demo-producer`; producer emits a stable `PUSH_SPACE(MonitorLocal) / FILL_RECT(10,10, cyan) / FILL_RECT(10,14, fps_bar) / POP_SPACE` stream each frame
+    - **Main assertion**: for EACH consumer, `pixel_at(consumer.client_area, (10, 10))` matches the cyan / fps-bar color (rgb ≈ `(0, 229, 229)` within a small tolerance, 8×8+ connected block) — captured via `PrintWindow` / `BitBlt` or equivalent readback of the consumer client area
+    - **EXPECTED OUTCOME on unfixed code**: Assertion FAILS — neither consumer shows cyan at `(10, 10)` even though all 22 preservation + 2 exploration + 26 lib + 87 renderer tests pass (the defining "tests green ≠ delivered" shape from bugfix.md)
+    - **H1–H5 probes (MUST be recorded before task 3.4 implements the fix)**:
+      - **H1 probe — Core per-Consumer Present routing**: add an `eprintln!` inside `dispatch_submit_frame`'s per-Consumer Present branch (debug build only); record whether it ever fires for the MonitorLocal submit stream. Expected counterexample if H1 holds: log is never emitted for `consumer_id` ∈ `{1, 2}` despite producer submitting `PUSH_SPACE(MonitorLocal)`
+      - **H2 probe — consumer-side `AddVisual` z-order**: temporarily swap the `insertAbove` / `referenceVisual` pair in `monitors/desktop-window/src/bin/consumer.rs` dual-visual mount, rebuild, rerun; record whether cyan becomes visible. Expected counterexample if H2 holds: with swapped arguments cyan is visible; with original arguments cyan is hidden
+      - **H3 probe — missing `dcomp_dev.Commit()` after `SetRoot`**: temporarily add `dcomp_dev.Commit()?;` immediately after `target.SetRoot(&root)?;`, rebuild, rerun; record whether cyan appears. Expected counterexample if H3 holds: single-line Commit addition makes cyan visible without any other change
+      - **H4 probe — per-Consumer Present stuck in `RetryNextTick`**: run `cargo run -p core-server --bin core-server 2>core_stderr.log` for ≥ 10 s, then `rg -c "PerConsumerResources] Present transient" core_stderr.log`. Expected counterexample if H4 holds: count grows roughly linearly with frames submitted (hundreds per second)
+      - **H5 probe — per-Consumer surface vs consumer client-area sizing**: rerun setup with consumer initial `CreateWindowExW` size changed from `720×420` to `1920×1080` (approximately canvas logical size); record whether cyan becomes visible. Expected counterexample if H5 holds: small window hides cyan, enlarged window reveals it
+    - **Naming obligation**: at the end of task 1, document which one (or more) of H1–H5 was CONFIRMED by the probes above; this chosen root cause becomes the annotated target of task 3.4 (`Change-D*` selection)
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: Test FAILS (this is correct — it proves all four sub-defects exist)
+  - Document counterexamples found per sub-property (1a: exact unknown-bin error string; 1b: captured title strings at `t_attach+Δ` and `t_disconnect+Δ`; 1c: file-existence + Cargo entry snapshot; 1d: per-consumer pixel readback at `(10, 10)` + the named confirmed H-hypothesis)
+  - Mark task complete when test is written, run, failures are documented with concrete counterexamples, AND the confirmed H-hypothesis from the 1d probes is recorded in the task file / PR description so task 3.4 can select the corresponding `Change-D*` branch
+  - _Requirements: 1.1, 1.2, 1.3, 1.4_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Non-Bug-Condition Behavior Equivalence Under Hotfix
+  - **IMPORTANT**: Follow observation-first methodology — this hotfix is additive and the preservation surface is already covered by the existing PBT A / A' / B / C / D in `core-server/tests/preservation.rs` and the two exploration tests in `core-server/tests/bug_condition_exploration.rs`; the preservation obligation is therefore to RECORD the unfixed baseline for every oracle AND verify that the existing test suite still passes end-to-end on unfixed code BEFORE any hotfix diff lands
+  - Observe and record on UNFIXED code (baseline oracle reuse — no new oracles are introduced, design.md §Testing Strategy → Property-Based Tests says "不新增 PBT"):
+    - Control-plane encode/decode round-trip bytes for random legal `ControlMessage` values (`RegisterProducer` / `RegisterConsumer` / `CreateCanvas` / `AttachConsumer` / `CanvasAttached` / `SubmitFrame` / `MonitorLocalSurfaceAttached`) per `core-server/src/ipc/protocol.rs` — already oracled in `preservation_oracles/control_plane_bytes.bin` and `preservation_oracles/control_plane_monitor_local_surface_bytes.bin`
+    - Pixel hash of Canvas shared surface after rendering random command sequences containing ONLY the 8 geometry opcodes plus `PUSH_SPACE(World)` / `POP_SPACE` (no `PUSH_SPACE(MonitorLocal)`) — already oracled in `preservation_oracles/world_only_hashes.txt`
+    - `desktop-window` consumer startup-to-steady-state trace of `DCompositionCreateSurfaceFromHandle` / `SetContent` / `CreateTargetForHwnd` / `SetRoot` calls — already oracled in `preservation_oracles/desktop_window_attach_trace.txt`
+    - Producer high-rate 1000Hz behavior for 10 s — already oracled in `preservation_oracles/high_rate_bounds.txt`
+    - Multi-consumer independence — already oracled in `preservation_oracles/multi_consumer_independence.txt`
+    - Orange-block animation end-to-end (PE-5, `animation-and-viewport-fix` defect A visual): record a short capture on unfixed hotfix baseline for manual pre/post comparison (no automated oracle — judged visually per design.md §Testing Strategy → Validation Approach)
+  - Write (or re-use existing) property-based tests capturing observed behavior patterns (see design.md §Preservation Checking and §Property-Based Tests — this hotfix RE-USES the PBTs from `animation-and-viewport-fix`, no new PBTs):
+    - **PBT A (control-plane bit-identical)**: assert `decode(encode(msg))` round-trip stays bit-identical AND encoded bytes match `control_plane_bytes.bin` for every generated value — validates PE-1, PE-6
+    - **PBT A' (`MonitorLocalSurfaceAttached` round-trip)**: assert bytes match `control_plane_monitor_local_surface_bytes.bin` — validates PE-1, PE-6, PE-7 (IPC symbol stability)
+    - **PBT B (World-only pixel equivalence)**: `proptest!` over World-only geometry command sequences; assert pixel hash matches `world_only_hashes.txt` — validates PE-8
+    - **PBT C (high-rate non-freeze, no unbounded growth)**: `proptest!` over producer submit intervals in [1 ms, 20 ms]; assert RSS growth and pixel-advance stay within `high_rate_bounds.txt` — validates PE-5 (no regression to animation stall) and PE-3
+    - **PBT D (multi-consumer independence)**: `proptest!` over random consumer up/down sequences for 2–4 consumers; assert the independence invariants captured in `multi_consumer_independence.txt` — validates PE-9
+    - **desktop-window attach trace equivalence**: assert the structural trace matches `desktop_window_attach_trace.txt` — validates PE-1 (and incidentally confirms Change-B's `SetWindowTextW` does NOT appear in the DComp/D3D trace, so the oracle is not perturbed)
+    - **bug-condition exploration replay**: re-run `prop_1a_submit_frame_rotates_through_distinct_buffers` and `prop_1b_monitor_local_fill_rect_is_visible_at_each_consumer_10_10` — validates PE-2
+    - **core-server lib suite**: `cargo test -p core-server --lib` — validates PE-3
+    - **renderer suite**: `cargo test` across `painter` / `resources` / `wic` / `mediafoundation` / `dcomp` modules — validates PE-4
+    - **Game Bar widget guard**: `git diff --stat` against `monitors/game-bar-widget/` must be empty — validates PE-10
+  - Property-based testing is the first-line guarantee here because the "NOT isBugCondition" input domain (all control-plane messages, all World-only command sequences, all non-bug doc-command strings, all non-bug window-title observations, all non-bug rename-probe queries, all non-bug end-to-end visible-render inputs) is effectively unbounded — PBT provides stronger guarantees than example-only tests across edge cases design.md explicitly lists (empty command batch, extreme submit rate, consumer up/down races)
+  - Verify tests PASS on UNFIXED code (confirms the baseline behavior oracle is correctly captured and the test harness is not falsely accusing the unfixed code of regressions)
+  - Run tests on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (this confirms baseline behavior to preserve — per design.md §Preservation Checking, 22 preservation + 2 exploration + 26 lib + 87 renderer tests all green on the unfixed hotfix baseline)
+  - Mark task complete when existing tests are confirmed to pass on the unfixed hotfix baseline AND the full test-run output is saved alongside the H1–H5 probe log from task 1 for reuse in task 3.8 / 3.9 pre/post comparison
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10_
+
+- [x] 3. Fix for hotfix-visible-render (doc / title / rename / MonitorLocal-invisible)
+
+  - [x] 3.1 Rename `desktop-window-consumer` bin and update `END-TO-END-TESTING.md` (Change-A — 修 1.1)
+    - In `monitors/desktop-window/Cargo.toml`, change the `[[bin]]` entry from `name = "desktop-window-consumer", path = "src/bin/consumer.rs"` to `name = "desktop-window-monitor", path = "src/bin/consumer.rs"` so the bin name aligns with the package name (design.md §Fix Implementation → Change-A)
+    - Leave the `desktop-demo-producer` `[[bin]]` entry untouched; add a single-line comment above it: `# TODO(canvas-monitor-lifecycle rename spec): rename desktop-demo-producer -> desktop-demo-app` (design.md §Fix Implementation → Change-A and §Correctness Properties → Property 3)
+    - In `END-TO-END-TESTING.md`, global-replace every occurrence of `cargo run -p desktop-window-monitor --bin consumer` and `cargo run -p desktop-window-monitor --bin desktop-window-consumer` with `cargo run -p desktop-window-monitor --bin desktop-window-monitor`; scan for any other `desktop-window-consumer` references and update them
+    - Verify `cargo check -p desktop-window-monitor --bin desktop-window-monitor` compiles the renamed bin
+    - _Bug_Condition: isBugCondition_doc(input) — documented cargo command references a bin name that does not exist in `monitors/desktop-window/Cargo.toml` (design.md §Bug Details → Bug Condition)_
+    - _Expected_Behavior: Property 1 from design.md §Correctness Properties — documented command runs as-is against the workspace, bin name aligns with package name_
+    - _Preservation: PE-1 through PE-10 (this change is Cargo-binding + doc only, no code path touched, no oracle perturbed)_
+    - _Requirements: 2.1_
+
+  - [x] 3.2 Add `SetWindowTextW` calls in `desktop-window-monitor` consumer (Change-B — 修 1.2)
+    - In `monitors/desktop-window/src/bin/consumer.rs`, add title-update call sites matching design.md §Fix Implementation → Change-B:
+      - On successful parse of `CanvasAttached { canvas_id, .. }`: call `SetWindowTextW(hwnd, title_for_attached(canvas_id, /*ml=*/false))` where `title_for_attached` formats `"Desktop Monitor - canvas {canvas_id} (world only)"`
+      - On successful parse of `MonitorLocalSurfaceAttached` (the `ml_info.is_some()` dual-visual branch), immediately call `SetWindowTextW(hwnd, title_for_attached(canvas_id, /*ml=*/true))` where the string becomes `"Desktop Monitor - canvas {canvas_id} (world + monitor_local)"`
+      - On pipe read error / non-timeout I/O error branch in the main message loop: call `SetWindowTextW(hwnd, w!("Desktop Monitor - reconnecting..."))`
+    - Factor the string-building logic into a pure helper `fn format_window_title(state: AttachState) -> String` (or equivalent) so three states — `Connecting`, `Attached { canvas_id, ml: bool }`, `Reconnecting` — are unit-testable without a real HWND
+    - Use a `w!`-compatible path for the PCWSTR conversion consistent with existing workspace uses (e.g. encode the owned `String` to `Vec<u16>` and pass via `PCWSTR::from_raw`); do NOT leak the `Vec<u16>` across `SetWindowTextW` return
+    - Do NOT alter the attach flow order, the visual-mount sequence, the `update_viewport` path, or any DComp / D3D call — the `desktop_window_attach_trace.txt` oracle must remain unchanged
+    - _Bug_Condition: isBugCondition_title(input) — `observe_window_title(hwnd, t_attach + Δ)` contains `"connecting..."` AND no `SetWindowTextW` call site exists after `CanvasAttached` / `MonitorLocalSurfaceAttached` / `pipe_disconnect` (design.md §Bug Details → Bug Condition)_
+    - _Expected_Behavior: Property 2 from design.md §Correctness Properties — title updates on attach (removing `"connecting..."` suffix) and on pipe disconnect (switching to `"reconnecting..."`)_
+    - _Preservation: PE-1 (`desktop_window_attach_trace.txt` unchanged — `SetWindowTextW` is not a DComp/D3D call), PE-8 (World-layer pixels unaffected)_
+    - _Requirements: 2.2_
+
+  - [x] 3.3 Rename `demo-producer` bin to `demo-app` and update terminology in touched doc strings (Change-C — 修 1.3)
+    - In `core-server`, move `src/bin/demo-producer.rs` to `src/bin/demo-app.rs`; update doc comments / module-level comments / inline comments that describe the file's own role (e.g. "demo producer binary") to use "demo app" / "app" terminology (design.md §Fix Implementation → Change-C)
+    - CRITICAL: do NOT rename `ControlMessage::RegisterProducer`, `register_producer`, `Producer` struct, or any other IPC protocol symbol — those are out of scope and belong to `canvas-monitor-lifecycle` per bugfix.md 2.3 / 3.7 and PE-7; leave call sites such as `ControlMessage::RegisterProducer { .. }` untouched inside `demo-app.rs`
+    - In `core-server/Cargo.toml`, update the `[[bin]]` entry `name = "demo-producer", path = "src/bin/demo-producer.rs"` to `name = "demo-app", path = "src/bin/demo-app.rs"`
+    - In `END-TO-END-TESTING.md`, replace all `cargo run -p core-server --bin demo-producer` with `cargo run -p core-server --bin demo-app`; update prose references to the file ("demo-producer" → "demo-app") only in the "demo binary" context; preserve "Producer" in protocol / IPC prose (e.g. "Producer 以 120Hz 发 SubmitFrame") per design.md §Fix Implementation → Change-C
+    - Verify `cargo build -p core-server --bin demo-app` compiles, and `rg "demo-producer" core-server` returns zero matches, and `rg "Producer|register_producer|ControlMessage::RegisterProducer" core-server/src/` match count equals the pre-hotfix count (IT-3 from design.md §Integration Tests)
+    - _Bug_Condition: isBugCondition_rename(input) — `file_path_exists("core-server/src/bin/demo-producer.rs")` OR `cargo_bin_entry("core-server", "demo-producer")` exists (design.md §Bug Details → Bug Condition)_
+    - _Expected_Behavior: Property 3 from design.md §Correctness Properties — `demo-app.rs` exists, `demo-app` is a valid bin, protocol symbols `Producer` / `register_producer` / `ControlMessage::RegisterProducer` unchanged_
+    - _Preservation: PE-7 (IPC protocol symbols unchanged), PE-1 through PE-10 (bin rename is additive over file system, no oracle perturbed, no code path logic changed)_
+    - _Requirements: 2.3_
+
+  - [x] 3.4 Apply the confirmed MonitorLocal visibility fix (Change-D branch selection — 修 1.4)
+    - **PREREQUISITE**: task 1 must have recorded ONE confirmed hypothesis (H1, H2, H3, H4, or H5) from design.md §Hypothesized Root Cause via the H1–H5 probes; the Change-D branch below is selected based on that recorded outcome, not chosen speculatively
+    - **If H1 confirmed (Core per-Consumer Present routing) → apply Change-D1**:
+      - In `core-server/src/server_task.rs::dispatch_submit_frame`, fix whatever gate in `scan_targets` / `canvas.per_consumer_surfaces` iteration caused the per-Consumer `pc.present()` branch not to execute; keep (or promote to `log::debug!`) the `eprintln!("[server_task] canvas={canvas_id} frame={frame_id} consumer={cid} MonitorLocal Present OK")` line used as the H1 probe so the fix is observable in future traces
+    - **If H2 confirmed (consumer-side `AddVisual` z-order reversed) → apply Change-D2**:
+      - In `monitors/desktop-window/src/bin/consumer.rs`, correct the `insertAbove` / `referenceVisual` argument pair on the second `root.AddVisual(&ml_visual, insertAbove, referenceVisual)?` call so MonitorLocal actually lands above World per DComp's documented semantics; add a brief comment citing the DComp `AddVisual` contract so the non-obvious argument direction does not regress
+    - **If H3 confirmed (missing `dcomp_dev.Commit()` after `SetRoot`) → apply Change-D3**:
+      - In `monitors/desktop-window/src/bin/consumer.rs`, add `dcomp_dev.Commit()?;` immediately after `target.SetRoot(&root)?;` before entering the message loop; do not remove the existing `Commit()` in the `update_viewport` path
+    - **If H4 confirmed (per-Consumer `Present()` stuck in `RetryNextTick`) → apply Change-D4**:
+      - In `core-server/src/renderer/dcomp.rs::PerConsumerResources`, align buffer management with World `CanvasResources`: bump `BUFFER_COUNT` to 3 (documented tunable) and/or fix the `present_color` → `SleepEx` → `drain(GetNextPresentStatistics)` ordering so the DWM buffer-available event actually signals between frames; classify `IPresentationManager::Present` return values so the transient-error path is logged (not silently swallowed) and device-lost triggers per-Consumer resource rebuild (mirroring task 3.1 of `animation-and-viewport-fix` for the World surface)
+    - **If H5 confirmed (per-Consumer surface sized to canvas_logical, not client area) → apply Change-D5**:
+      - In `monitors/desktop-window/src/bin/consumer.rs`, add a `ml_visual.SetTransform2` (scale + translate) or `SetClip` so the MonitorLocal surface presents its `(10, 10)` logical origin at the consumer's client `(10, 10)` regardless of client-area dimensions; if this cannot be done without a protocol change (client dims reported to Core), STOP and escalate to the user — extending the protocol exceeds this hotfix's scope per bugfix.md §Introduction, and the fallback is to annotate a known-issue and defer full H5 fix to `canvas-monitor-lifecycle`
+    - **If more than one hypothesis confirmed**: apply the Change-D* branches in the order H3 → H2 → H1 → H4 → H5 (cheapest and most localized first), re-run the task 1 H1–H5 probes after each sub-change to confirm which diffs are load-bearing; drop any diff that turns out not to be required
+    - **If all hypotheses refuted by task 1**: STOP and return to design.md §Hypothesized Root Cause to add a new hypothesis — this hotfix's core discipline (design.md §Fix Implementation → "收口原则") forbids a "just commit and see if the suite stays green" fix, since that is precisely the failure mode that motivated the spec
+    - _Bug_Condition: isBugCondition_visible(input) — two `desktop-window-monitor` consumers attached, producer emitting `PUSH_SPACE(MonitorLocal) / FILL_RECT(10,10, cyan/fps) / POP_SPACE`, all automated tests green AND at least one consumer's `pixel_at(client_area, (10, 10))` does NOT match cyan_or_fps_bar_color (design.md §Bug Details → Bug Condition)_
+    - _Expected_Behavior: Property 4 from design.md §Correctness Properties — each attached consumer renders cyan + FPS bar at its client-area `(10, 10)` regardless of screen position; chosen root cause is named; fix targets that named root cause (not the harness)_
+    - _Preservation: PE-1..PE-4 (test suites still pass), PE-5 (orange-block animation unchanged), PE-6 (control-plane bytes unchanged — no new opcodes introduced), PE-7 (IPC symbols unchanged), PE-8 (World-layer pixels unchanged), PE-9 (multi-consumer independence unchanged), PE-10 (Game Bar widget untouched)_
+    - _Requirements: 2.4_
+
+  - [x] 3.5 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Hotfix Visible Render Delivered (Doc / Title / Rename / MonitorLocal-Visible)
+    - **IMPORTANT**: Re-run the SAME test from task 1 — do NOT write a new test
+    - The test from task 1 encodes the expected behavior; when all four sub-properties (1a doc, 1b title, 1c rename, 1d visible) pass, it confirms Properties 1 / 2 / 3 / 4 from design.md §Correctness Properties are satisfied
+    - Re-run sub-property 1a against the fixed workspace (Change-A applied): assert `cargo check -p desktop-window-monitor --bin desktop-window-monitor` exits 0 and `END-TO-END-TESTING.md` contains the new command string
+    - Re-run sub-property 1b against the fixed consumer (Change-B applied): assert `GetWindowTextW` after attach does NOT contain `"connecting..."`, and after pipe disconnect DOES contain `"reconnecting"`
+    - Re-run sub-property 1c against the fixed workspace (Change-C applied): assert `core-server/src/bin/demo-app.rs` exists, `core-server/src/bin/demo-producer.rs` does NOT exist, `cargo_bin_entry("core-server", "demo-app")` exists, AND `Producer` / `register_producer` / `ControlMessage::RegisterProducer` symbols still exist with unchanged match counts in `core-server/src/`
+    - Re-run sub-property 1d against the fixed build (Change-D* applied): spin up 2 `desktop-window-monitor` consumers + `demo-app`, assert each consumer's pixel readback at client `(10, 10)` matches cyan_or_fps_bar_color; record the confirmed root-cause name (H1 / H2 / H3 / H4 / H5) so the chosen fix and its evidence are co-located in the PR
+    - **EXPECTED OUTCOME**: Test PASSES across all four sub-properties (confirms the four defects are fixed)
+    - If any sub-property still fails, do NOT modify the test — revisit the corresponding implementation sub-task (3.1 / 3.2 / 3.3 / 3.4) and its hypothesized root cause; for 1d failure, return to task 1's H1–H5 probes and select or add a new hypothesis
+    - _Requirements: 2.1, 2.2, 2.3, 2.4_
+
+  - [x] 3.6 Verify preservation tests still pass
+    - **Property 2: Preservation** - Non-Bug-Condition Behavior Equivalence Under Hotfix
+    - **IMPORTANT**: Re-run the SAME tests from task 2 — do NOT write new tests
+    - Run all preservation tests from task 2 against the fixed implementation, reusing the existing oracles under `core-server/tests/preservation_oracles/`:
+      - **PBT A** on `control_plane_bytes.bin` — bit-identical (validates PE-1, PE-6)
+      - **PBT A'** on `control_plane_monitor_local_surface_bytes.bin` — bit-identical (validates PE-1, PE-6, PE-7)
+      - **PBT B** on `world_only_hashes.txt` — World-only pixel hashes unchanged (validates PE-8)
+      - **PBT C** on `high_rate_bounds.txt` — high-rate RSS/advance bounds unchanged (validates PE-5, PE-3)
+      - **PBT D** on `multi_consumer_independence.txt` — per-consumer independence unchanged (validates PE-9)
+      - **desktop-window attach trace** on `desktop_window_attach_trace.txt` — structural equality (validates PE-1; confirms Change-B's `SetWindowTextW` not present in DComp/D3D trace)
+      - **exploration replay** — `prop_1a_submit_frame_rotates_through_distinct_buffers` and `prop_1b_monitor_local_fill_rect_is_visible_at_each_consumer_10_10` still pass (validates PE-2)
+      - **core-server lib** — `cargo test -p core-server --lib` 26 tests pass (validates PE-3)
+      - **renderer** — 87 renderer tests pass (validates PE-4)
+      - **Game Bar widget guard** — `git diff --stat` on `monitors/game-bar-widget/` is empty (validates PE-10)
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regression on any `NOT isBugCondition(input)`; 22 preservation + 2 exploration + 26 lib + 87 renderer tests all green, matching the task 2 unfixed baseline exactly)
+    - Confirm specifically: (a) on-the-wire bytes of all `ControlMessage` variants including `MonitorLocalSurfaceAttached` are bit-identical; (b) World-only rendering is pixel-hash equal; (c) orange-block animation end-to-end continues to slide without window events (PE-5); (d) the IPC symbols `Producer` / `register_producer` / `ControlMessage::RegisterProducer` are unchanged (rg-counted, PE-7); (e) the Game Bar widget directory is untouched (PE-10)
+    - If any preservation test regresses, do NOT modify the test — the regression points to a real preservation violation in Change-A / B / C / D that must be fixed in the relevant sub-task
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10_
+
+- [x] 4. Checkpoint - Ensure all tests pass
+  - Ensure all tests pass (task 1 exploration test passing across sub-properties 1a / 1b / 1c / 1d, task 2 preservation tests still passing, plus existing test suites in `core-server`, `monitors/desktop-window`, and the Game Bar widget projects), ask the user if questions arise.

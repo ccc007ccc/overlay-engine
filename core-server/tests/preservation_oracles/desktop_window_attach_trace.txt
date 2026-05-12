@@ -1,0 +1,8 @@
+# Desktop-window consumer startup-to-steady-state API trace
+# (handle values are per-process; only the call structure is asserted)
+1 send RegisterConsumer { pid: <u32> }
+2 recv CanvasAttached { canvas_id: <u32>, surface_handle: <u64>, logical_w: <u32>, logical_h: <u32>, render_w: <u32>, render_h: <u32> }
+3 DCompositionCreateSurfaceFromHandle(<surface_handle>)
+4 Visual.SetContent(<surface>)
+5 DCompositionCreateTargetForHwnd(<hwnd>, topmost=true)
+6 Target.SetRoot(<visual>)

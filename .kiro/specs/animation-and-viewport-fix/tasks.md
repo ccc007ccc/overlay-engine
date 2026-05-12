@@ -1,0 +1,123 @@
+# Implementation Plan
+
+- [x] 1. Write bug condition exploration test (BEFORE implementing fix)
+  - **Property 1: Bug Condition** - Animation Stall And MonitorLocal Space Missing
+  - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the bug exists
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior (Property 1 and Property 2 from design.md §Correctness Properties) — it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate both缺陷 A (animation stall) and缺陷 B (MonitorLocal space missing) exist on unfixed code
+  - **Scoped PBT Approach**: For deterministic bugs (both A and B are deterministic given the inputs), scope the property to concrete failing case(s) to ensure reproducibility; use `proptest` to parameterize producer rate, observation window, and consumer screen coordinates while scoping to the failing regimes
+  - Implement the test harness as an integration test that spins up `core-server` + a stub producer + one or more stub consumers that perform pixel-readback on their DComp surface content (see design.md §Testing Strategy → Exploratory Bug Condition Checking)
+  - **Sub-property 1a — Animation stall (isBugCondition_A)**:
+    - Stub producer submits a ~120Hz stream of `SubmitFrame` with strictly increasing `frame_id` rendering a moving rectangle in World space
+    - All consumer windows held static for an observation window ≥ `2 * display_refresh_period`
+    - Assert: consumer client-area pixel hash advances at least `⌊ observationWindow * (display_refresh_rate / 2) ⌋` times, WITHOUT firing any `WM_WINDOWPOSCHANGED` / drag / resize event (from Bug Condition `isBugCondition_A` and Property 1 in design.md)
+    - **EXPECTED OUTCOME on unfixed code**: Assertion FAILS — pixel hash is constant while `frame_id` increments (counterexample shape documented in design.md §Exploratory Bug Condition Checking → Expected Counterexamples 1-2)
+  - **Sub-property 1b — MonitorLocal space missing (isBugCondition_B)**:
+    - Stub producer emits a sequence intended for MonitorLocal space: `PUSH_SPACE(MonitorLocal)` → `FILL_RECT(10, 10, 20, 4, green)` → `POP_SPACE`
+    - N ≥ 2 stub consumers attach the same Canvas, each positioned at a distinct screen origin not equal to `(10, 10)`
+    - Assert: for every consumer, `pixel_at(consumer.client_area, (10, 10)) == green` and no green artifact appears outside `(10, 10)` of each consumer client area (from Bug Condition `isBugCondition_B` and Property 2 in design.md)
+    - **EXPECTED OUTCOME on unfixed code**: Assertion FAILS — either `PUSH_SPACE`/`POP_SPACE` opcodes are unknown and rejected, or the fallback rendering lands the green rect at global `(10, 10)` visible to at most one consumer (counterexample shape documented in design.md §Exploratory Bug Condition Checking → Expected Counterexamples 3-4)
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: Test FAILS (this is correct — it proves both缺陷 A and缺陷 B exist)
+  - Document counterexamples found to understand root cause; use counterexample shape to validate or refute the hypotheses in design.md §Hypothesized Root Cause (e.g. single-buffer DWM hold for A; missing PUSH_SPACE protocol and shared-surface architecture for B)
+  - Mark task complete when test is written, run, and failure is documented with concrete counterexample pairs `(frame_id_series, pixel_hash_series)` for 1a and `(consumer_screen_origin, pixel_at_10_10)` for 1b
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Non-Bug-Condition Behavior Equivalence
+  - **IMPORTANT**: Follow observation-first methodology — run unfixed code on `NOT isBugCondition(input)` inputs, record actual observable outputs, then write property-based tests that assert those observed outputs across the input domain
+  - Observe and record on UNFIXED code (baseline oracle):
+    - Control-plane encode/decode round-trip bytes for random legal `ControlMessage` values (`RegisterProducer` / `RegisterConsumer` / `CreateCanvas` / `AttachConsumer` / `CanvasAttached` / `SubmitFrame`) per `core-server/src/ipc/protocol.rs`
+    - Pixel hash of Canvas shared surface after rendering random command sequences containing only the 8 existing geometry opcodes (`CLEAR` / `FILL_RECT` / `STROKE_RECT` / `FILL_ROUNDED_RECT` / `STROKE_ROUNDED_RECT` / `FILL_ELLIPSE` / `STROKE_ELLIPSE` / `DRAW_LINE`) with NO `PUSH_SPACE` / `POP_SPACE`
+    - `desktop-window` consumer startup-to-steady-state trace of `DCompositionCreateSurfaceFromHandle` / `SetContent` / `CreateTargetForHwnd` / `SetRoot` calls and their argument shapes (handle values may differ, call structure must not)
+    - Resident memory growth and consumer pixel-advance count when producer blasts at 1000Hz for 10 seconds
+    - Behavior when one of two attached consumers is killed: the survivor continues to observe World-space frame advances
+    - Behavior when the owner producer is killed: canvas D3D/DComp resources are released and remaining consumers do not crash
+  - Write property-based tests capturing observed behavior patterns (see design.md §Preservation Checking and §Property-Based Tests):
+    - **PBT A (control-plane bit-identical)**: `proptest!` over random legal `ControlMessage`; assert `decode(encode(msg))` is bit-identical AND `encode(msg)` bytes produced by fixed implementation are bit-identical to bytes produced by unfixed implementation (oracle recording captured from this task) for every generated value
+    - **PBT B (World-only pixel equivalence)**: `proptest!` over random command sequences drawn from `{CLEAR, FILL_RECT, STROKE_RECT, FILL_ROUNDED_RECT, STROKE_ROUNDED_RECT, FILL_ELLIPSE, STROKE_ELLIPSE, DRAW_LINE}` with no `PUSH_SPACE`; assert the final Canvas shared surface pixel hash on fixed implementation equals the oracle hash recorded from unfixed implementation (allow ≤ 1 LSB tolerance as spelled out in design.md §Preservation Checking)
+    - **PBT C (high-rate non-freeze, no unbounded growth)**: `proptest!` over producer submit intervals in [1ms, 20ms] and durations in [1s, 15s]; assert Core RSS growth under threshold AND consumer pixel-advance count ≥ half the refresh-period count for the window (oracle threshold taken from unfixed baseline)
+    - **PBT D (multi-consumer independence)**: `proptest!` over random consumer up/down sequences for 2–4 consumers on one Canvas with only World-space rendering; assert that at every time step, every surviving consumer continues receiving frame advances within bounded latency
+    - **Unit-level preservation**: assert existing 8 geometry opcodes decode unchanged and are rendered as World space when the space stack is empty or contains only World (Preservation Requirement 3.6 and Glossary "未显式 PUSH 的命令默认 World")
+  - Property-based testing is recommended here (over example-only tests) because the preservation input domain (`NOT isBugCondition`) is effectively unbounded over control-plane message shapes, World-space command sequences, and producer pacing — PBT provides stronger guarantees that behavior is unchanged across edge cases design.md explicitly lists (empty command batch, extreme submit rate, etc.)
+  - Verify tests PASS on UNFIXED code (this confirms the baseline behavior oracle is correctly captured and the test harness is not falsely accusing the unfixed code of regressions)
+  - Run tests on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (this confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code; commit the captured oracles (byte fixtures, pixel hashes, API-call traces) under `core-server/tests/preservation_oracles/` for reuse in task 3.3
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9_
+
+- [x] 3. Fix for animation stall and missing MonitorLocal space
+
+  - [x] 3.1 Introduce multi-buffer rotation and correct buffer-availability handshake in `CanvasResources`
+    - In `core-server/src/renderer/dcomp.rs`, convert the single `texture` / `rtv` / `buffer` fields on `CanvasResources` into parallel `Vec<>` collections of length `N ≥ 2` (recommend starting at `N = 2`, with `N = 3` as a tunable knob documented near the struct); keep `render_w` / `render_h` / `handle` / `manager` / `surface` as single instances (design.md §Fix Implementation → Change 1)
+    - On each `SubmitFrame`, acquire a buffer that is NOT currently held by DWM before writing: poll `IPresentationBuffer::GetAvailableEvent` across the N buffers and pick the first signaled one; on all-busy, use a bounded wait (e.g. `WaitForMultipleObjects` with a timeout tied to one refresh period) and drop the frame on timeout rather than blocking the IPC read loop or queueing unboundedly (design.md §Fix Implementation → Change 2 and Preservation Requirement 8 / Bugfix 3.8)
+    - Classify `IPresentationManager::Present` return values into {success, retry-next-tick / drop, fatal device-lost → trigger Canvas resource rebuild}; remove the existing silent `eprintln!` swallow path (design.md §Fix Implementation → Change 3 and §Hypothesized Root Cause A.2)
+    - Keep `UpdateSubresource` / `ClearRenderTargetView` / `FillRectangle` issuance against the chosen buffer's RTV; ensure DComp `SetBuffer` references the selected `IPresentationBuffer` instance (not the fixed original one) so DWM observes a distinct buffer handle per frame (design.md §Hypothesized Root Cause A.1)
+    - _Bug_Condition: isBugCondition_A(input) — steady-rate SubmitFrame + static windows + strictly increasing frame_id + observation window ≥ 2 · display_refresh_period AND consumer pixels do not advance (design.md §Bug Details → Bug Condition)_
+    - _Expected_Behavior: Property 1 from design.md §Correctness Properties — pixel advance count ≥ ⌊ observationWindow · display_refresh_rate / 2 ⌋, no dependency on any window event_
+    - _Preservation: Preservation Requirements 3.8 (no unbounded queueing, no total freeze under high rate) and 3.2 / 3.3 (`desktop-window` and Game Bar widget consumer API surface unchanged — consumers do NOT learn buffer count changed from 1 to N)_
+    - _Requirements: 1.1, 1.2, 1.3, 2.1, 2.2, 2.3, 3.2, 3.3, 3.8_
+
+  - [x] 3.2 Add `CMD_PUSH_SPACE` / `CMD_POP_SPACE` opcodes to the command ringbuffer and decoder
+    - In `core-server/src/ipc/cmd_decoder.rs`, allocate two new opcodes in the command-opcode range (non-colliding with `CMD_CLEAR=0x0101`..`CMD_DRAW_LINE=0x0108`), e.g. `CMD_PUSH_SPACE = 0x0109` with payload `u32 space_id` (`0 = World`, `1 = MonitorLocal`) and `CMD_POP_SPACE = 0x010A` with empty payload (design.md §Fix Implementation → Change 6)
+    - Maintain a per-`SubmitFrame`-scoped space stack in the decoder/dispatcher; top-of-stack selects the render target for subsequent geometry opcodes
+    - Default space (empty stack or bottom-of-stack) MUST be World — this preserves existing producers that never emit `PUSH_SPACE` (design.md §Fix Implementation → Change 6, Glossary, and Preservation Requirement 3.6 / Bugfix 2.6)
+    - On misuse (POP on empty stack, PUSH of unknown `space_id`, frame end with non-empty stack): emit a warning log and skip the offending command; DO NOT crash or invalidate already-dispatched commands in the frame
+    - _Bug_Condition: isBugCondition_B(input) — producer expresses `ProducerDrawAt_10_10_LocalIntent` or `MultiConsumerSameCanvas` with consumer client origin ≠ (input.x, input.y)_
+    - _Expected_Behavior: Property 2 from design.md §Correctness Properties — MonitorLocal-scoped commands render at each consumer's client-area (10, 10); Producer未显式声明空间时命令视为 World (Bugfix 2.6)_
+    - _Preservation: Preservation Requirements 3.1 (control-plane on-the-wire bytes unchanged) and 3.6 (existing 8 geometry opcodes unchanged when no space is pushed)_
+    - _Requirements: 1.6, 2.4, 2.5, 2.6, 3.1, 3.6_
+
+  - [x] 3.3 Add per-Consumer MonitorLocal surfaces in Core and extend attach flow
+    - In `core-server/src/ipc/server.rs`, extend `Canvas` with `per_consumer_surfaces: HashMap<ConsumerId, PerConsumerResources>`; define `PerConsumerResources` as a reduced-scope `CanvasResources`-analog owning its own multi-buffer ring (reuse logic from task 3.1), its own DComp surface, and its own NT handle (design.md §Fix Implementation → Change 4)
+    - In `attach_consumer`, after duplicating the existing World surface handle, create (or lazily create on first MonitorLocal frame) a per-Consumer MonitorLocal surface sized to the consumer's reported client-area logical dimensions (or a bounded cap, e.g. `min(canvas_logical, 4096)`); duplicate its NT handle into the consumer process
+    - Choose the backward-compatible attach-protocol variant: **preferred (方案 α)** — do NOT change `CanvasAttached` layout; introduce a new message `MonitorLocalSurfaceAttached { canvas_id, consumer_id, surface_handle, logical_w, logical_h }` with a new control-plane opcode, sent immediately after `CanvasAttached`. Older consumers that do not recognize the opcode must be able to ignore it without erroring — update `ControlMessage::decode` to downgrade unknown opcodes from error to warning, and verify the preservation PBT A (control-plane round-trip) still passes after this change (design.md §Fix Implementation → Change 5, methods α/β discussion)
+    - Ensure per-Consumer surface creation/destruction is tied to the consumer lifecycle: on consumer disconnect, release its `PerConsumerResources`; on producer disconnect, release every `PerConsumerResources` along with the World `CanvasResources` and notify surviving consumers (Preservation 3.4, 3.5)
+    - _Bug_Condition: isBugCondition_B(input) — MultiConsumerSameCanvas or ProducerDrawAt_10_10_LocalIntent where consumer_client_origin_on_screen(consumer) ≠ (x, y)_
+    - _Expected_Behavior: Property 2 from design.md — MonitorLocal content appears independently at each consumer's client-area (10, 10) with no cross-consumer overlap or bleed_
+    - _Preservation: Preservation Requirements 3.1 (`CanvasAttached` on-the-wire layout unchanged under方案 α), 3.2 / 3.3 (desktop-window and Game Bar widget paths still work), 3.4 (multi-consumer independence), 3.5 (producer-drop resource recovery), 3.9 (Consumer 仍不能主动申请空间)_
+    - _Requirements: 1.4, 1.5, 2.4, 2.5, 3.1, 3.2, 3.3, 3.4, 3.5, 3.9_
+
+  - [x] 3.4 Implement dual-target rendering loop in `server_task.rs::SubmitFrame`
+    - In `core-server/src/server_task.rs`, restructure the `SubmitFrame` dispatch to walk the command stream once, pushing/popping the space stack defined in task 3.2, and routing each geometry command as follows (design.md §Fix Implementation → Change 7):
+      - Space stack top = World (or empty) → issue draw against `canvas.resources` (World multi-buffer from task 3.1)
+      - Space stack top = MonitorLocal → for each `consumer_id` in `canvas.per_consumer_surfaces`, replay the same draw against that consumer's `PerConsumerResources` target
+    - At end-of-frame, independently `Present` the World surface and each per-Consumer MonitorLocal surface; a `Present` failure on one per-Consumer surface MUST NOT propagate to others or to World
+    - Emit a rolling-average render-duration log metric per frame so that multi-consumer replay cost is observable; document the threshold at which a warning is logged (design.md §Fix Implementation → Change 7 note on per-Consumer cost)
+    - Keep the IPC read loop responsive: the draw/present loop must not block under high submit rates (Preservation 3.8 / Bugfix 3.8) — use the bounded-wait and drop-frame policy from task 3.1 uniformly across World and per-Consumer targets
+    - _Bug_Condition: isBugCondition(input) — union of A (animation stall) and B (MonitorLocal missing)_
+    - _Expected_Behavior: Property 1 AND Property 2 from design.md §Correctness Properties — frame advance without window events AND per-consumer MonitorLocal anchoring_
+    - _Preservation: Preservation Requirements 3.4 (per-consumer independence — one consumer's present failure does not block others), 3.6 (default = World when no space pushed), 3.8 (IPC read loop not starved, no unbounded queue)_
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 3.4, 3.6, 3.8_
+
+  - [x] 3.5 Update `desktop-window` consumer to mount the MonitorLocal visual layer
+    - In `monitors/desktop-window/src/bin/consumer.rs` and `monitors/desktop-window/src/dcomp.rs`, add handling for the new `MonitorLocalSurfaceAttached` message (task 3.3): call `DCompositionCreateSurfaceFromHandle` on the MonitorLocal NT handle, create a second visual, and mount it ABOVE the World visual in z-order with size covering the full client area (design.md §Fix Implementation → Change 8)
+    - The existing `update_viewport` path must CONTINUE to apply only to the World visual (World's "透视画布的哪一块" semantics unchanged — Preservation 3.7 / Bugfix 3.7); the MonitorLocal visual must NOT apply viewport offset — its pixels are already in client-area coordinates
+    - Older consumer binaries that have not yet been updated must continue to function: if they receive an unknown opcode (`MonitorLocalSurfaceAttached`), they must ignore it and continue using only the World visual (ties to task 3.3's decoder change and Preservation 3.2)
+    - For the Game Bar widget consumer, apply the same dual-visual mount on the UWP `Compositor` side using `CreateSurfaceFromHandle` — stay within Game Bar / UWP-allowed interop surface so Preservation 3.3 holds (no new capabilities, no desktop-only APIs)
+    - _Bug_Condition: isBugCondition_B(input) — MonitorLocal content rendered by Core is useless without a consumer-side visual to display it_
+    - _Expected_Behavior: Property 2 from design.md — MonitorLocal content visible at each consumer's client-area (10, 10)_
+    - _Preservation: Preservation Requirements 3.2 (desktop-window existing attach path intact), 3.3 (Game Bar widget / UWP sandbox compatibility), 3.7 (update_viewport behavior unchanged for World layer)_
+    - _Requirements: 2.4, 2.5, 3.2, 3.3, 3.7_
+
+  - [x] 3.6 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Animation Continuous Advance And MonitorLocal Per-Consumer Anchoring
+    - **IMPORTANT**: Re-run the SAME test from task 1 — do NOT write a new test
+    - The test from task 1 encodes the expected behavior; when it passes, it confirms Property 1 and Property 2 from design.md §Correctness Properties are satisfied
+    - Run the bug-condition exploration test from task 1 (both sub-properties 1a and 1b) against the fixed implementation produced by tasks 3.1–3.5
+    - **EXPECTED OUTCOME**: Test PASSES (confirms both缺陷 A and缺陷 B are fixed)
+    - If any sub-property still fails, do NOT modify the test — revisit the corresponding implementation task (3.1 for 1a, 3.2–3.5 for 1b) and the hypothesized root cause
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
+
+  - [x] 3.7 Verify preservation tests still pass
+    - **Property 2: Preservation** - Non-Bug-Condition Behavior Equivalence
+    - **IMPORTANT**: Re-run the SAME tests from task 2 — do NOT write new tests
+    - Run all preservation property tests from task 2 (PBT A control-plane bit-identical, PBT B World-only pixel equivalence, PBT C high-rate non-freeze, PBT D multi-consumer independence, and unit-level preservation) against the fixed implementation, reusing the oracle artifacts captured in `core-server/tests/preservation_oracles/`
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions on any `NOT isBugCondition(input)`)
+    - Confirm that: (a) on-the-wire bytes of `RegisterProducer` / `RegisterConsumer` / `CreateCanvas` / `AttachConsumer` / `CanvasAttached` / `SubmitFrame` are bit-identical; (b) World-only rendering is visually indistinguishable; (c) `desktop-window` and Game Bar widget attach traces are structurally unchanged; (d) multi-consumer independence and producer-drop cleanup paths are intact; (e) no unbounded memory growth under 1000Hz submit rate
+    - If any preservation test regresses, do NOT modify the test — the regression points to a real preservation violation that must be fixed in the relevant implementation task
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9_
+
+- [x] 4. Checkpoint - Ensure all tests pass
+  - Ensure all tests pass (task 1 exploration test passing, task 2 preservation tests passing, plus any existing test suites in `core-server`, `monitors/desktop-window`, and the Game Bar widget projects), ask the user if questions arise

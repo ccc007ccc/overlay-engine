@@ -1,0 +1,6 @@
+# Multi-consumer independence invariants
+invariant.consumers_survive_their_siblings=true
+invariant.producer_removal_drops_owned_canvases=true
+invariant.consumer_removal_does_not_drop_canvases=true
+min_consumers_per_scenario=2
+max_consumers_per_scenario=4

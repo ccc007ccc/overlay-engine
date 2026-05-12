@@ -1,0 +1,20 @@
+=== PE-7: IPC symbol rg-count (post-fix) ===
+Pattern: Producer|register_producer|ControlMessage::RegisterProducer
+Scope:   core-server/src/ (recursive)
+
+Per-file occurrences:
+  core-server\src\bin\demo-app.rs                                 4
+  core-server\src\ipc\cmd_decoder.rs                              1
+  core-server\src\ipc\protocol.rs                                 7
+  core-server\src\ipc\server.rs                                  26
+  core-server\src\ipc\shmem.rs                                    1
+  core-server\src\renderer\dcomp.rs                               2
+  core-server\src\server_task.rs                                 21
+
+TOTAL_LINES_WITH_A_MATCH     = 54
+TOTAL_OCCURRENCE_COUNT       = 62
+
+=== Parity notes ===
+Task 3.3 pre-rename baseline recorded 4 matches in core-server/src/bin/demo-producer.rs
+Post-fix: core-server/src/bin/demo-app.rs has 4
+          — PARITY PRESERVED (PE-7 OK)
