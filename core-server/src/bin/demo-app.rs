@@ -339,6 +339,10 @@ async fn main() -> anyhow::Result<()> {
         //     / (10, 10) 客户区位置 —— 这是修复前做不到的.
         write_cmd_push_space(shmem_bytes, &mut pos, SPACE_ID_MONITOR_LOCAL);
 
+        // CLEAR MonitorLocal：必须加上这一步，否则多缓冲机制下上一帧的字会残留在屏幕上！
+        // 渲染背景完全透明，只保留我们的绘制内容。
+        write_cmd_clear(shmem_bytes, &mut pos, 0.0, 0.0, 0.0, 0.0);
+
         // 左上 cyan 徽章(MonitorLocal): 每个 monitor 客户区左上 (margin, margin)
         write_cmd_fill_rect(
             shmem_bytes,
