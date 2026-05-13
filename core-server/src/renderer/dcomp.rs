@@ -26,6 +26,8 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::System::Threading::WaitForMultipleObjectsEx;
 
+use std::sync::Mutex;
+
 pub const COMPOSITIONOBJECT_ALL_ACCESS: u32 = 0x0003;
 
 /// Number of buffers a Canvas rotates between per-frame. Design §Fix
@@ -33,21 +35,27 @@ pub const COMPOSITIONOBJECT_ALL_ACCESS: u32 = 0x0003;
 /// that lets DWM retire a buffer while Core writes the next one. `N = 3` is a
 /// tunable knob — increasing it trades GPU memory for additional headroom
 /// under bursty presents; benchmark before changing.
-pub const BUFFER_COUNT: usize = 2;
+pub const BUFFER_COUNT: usize = 3;
 
-/// Bounded wait used by `CanvasResources::acquire_available_buffer`. Scaled to
-/// roughly one display refresh period at 60 Hz (~16.67 ms) so the IPC read
-/// loop is never blocked for longer than one frame even when all N buffers
-/// are simultaneously held by DWM (design.md §Fix Implementation → Change 2
-/// and Preservation Requirement 8). On timeout the caller drops the frame
-/// rather than blocking or queueing unboundedly.
-pub const ACQUIRE_TIMEOUT_MS: u32 = 16;
+/// We now use an INFINITE timeout to explicitly allow backpressure.
+/// When DWM has consumed all buffers, the IPC reader will block, naturally
+/// throttling the client app via the pipe buffer, instead of dropping frames
+/// and wasting GPU rendering work or creating buffer bloat races.
+pub const ACQUIRE_TIMEOUT_MS: u32 = windows::Win32::System::Threading::INFINITE;
+
+pub struct RenderContextGuard {
+    pub d3d_ctx: ID3D11DeviceContext,
+    pub d2d: D2DEngine,
+}
 
 pub struct CoreDevices {
     pub d3d: ID3D11Device,
-    pub d3d_ctx: ID3D11DeviceContext,
-    pub(crate) d2d: D2DEngine,
     pub dcomp: IDCompositionDesktopDevice,
+    // ID3D11DeviceContext is NOT thread-safe for concurrent command recording.
+    // We must wrap it and D2D in a Mutex so that multiple connected clients
+    // executing `dispatch_submit_frame` concurrently do not race and crash
+    // the GPU driver with STATUS_ACCESS_VIOLATION.
+    pub render_ctx: Mutex<RenderContextGuard>,
 }
 
 // These are COM pointers which are thread-safe in our context as long as we only use them
@@ -85,9 +93,8 @@ impl CoreDevices {
 
         Ok(Self {
             d3d,
-            d3d_ctx,
-            d2d,
             dcomp,
+            render_ctx: Mutex::new(RenderContextGuard { d3d_ctx, d2d }),
         })
     }
 }
@@ -521,9 +528,20 @@ impl PerMonitorResources {
             }
         }
 
+        // Set bAlertable to true.
+        // If DWM hasn't recycled our buffer yet, we must allow its Present
+        // Completion APCs to execute during our wait.
         let wait_result = unsafe { WaitForMultipleObjectsEx(&events, false, timeout_ms, true) };
 
         if wait_result == windows::Win32::Foundation::WAIT_IO_COMPLETION {
+            // An APC ran, likely signaling that DWM finished presenting.
+            // We MUST drain the present statistics so the Presentation Manager
+            // actually retires the buffer and signals the event!
+            unsafe {
+                while self.manager.GetNextPresentStatistics().is_ok() {}
+            }
+
+            // Now check again with 0 timeout.
             let retry = unsafe { WaitForMultipleObjectsEx(&events, false, 0, false) };
             let base = WAIT_OBJECT_0.0;
             if retry.0 >= base && retry.0 < base + events.len() as u32 {
