@@ -208,11 +208,13 @@ async fn main() -> anyhow::Result<()> {
     let mut last_fps_time = std::time::Instant::now();
     let mut fps_frame_count: u64 = 0;
     let mut current_fps: f32 = 0.0;
+    let start_time = std::time::Instant::now();
 
     loop {
         frame_id += 1;
         fps_frame_count += 1;
-        let t = frame_id as f32 * 0.02;
+        // Use real time for animation so it looks smooth regardless of framerate
+        let t = start_time.elapsed().as_secs_f32() * 2.0;
 
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(last_fps_time).as_secs_f32();
