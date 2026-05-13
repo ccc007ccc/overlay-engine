@@ -210,6 +210,13 @@ async fn main() -> anyhow::Result<()> {
     let mut current_fps: f32 = 0.0;
     let start_time = std::time::Instant::now();
 
+    // Use a simple ring-buffer strategy for the offset to prevent data races
+    // when running --unlocked. We advance the offset by 4KB each frame and
+    // wrap around at 2MB.
+    let mut current_offset: u32 = 24;
+    let max_offset: u32 = 2 * 1024 * 1024;
+    let frame_max_size: u32 = 4096;
+
     loop {
         frame_id += 1;
         fps_frame_count += 1;
@@ -224,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
             last_fps_time = now;
         }
 
-        let cmd_offset: u32 = 24;
+        let cmd_offset = current_offset;
         let mut pos = cmd_offset as usize;
 
         // CLEAR：深色半透明背景（premultiplied: rgb *= alpha）
@@ -397,6 +404,15 @@ async fn main() -> anyhow::Result<()> {
         // ---- MonitorLocal 区间结束 ---------------------------------
 
         let cmd_length = (pos - cmd_offset as usize) as u32;
+        if cmd_length > frame_max_size {
+            eprintln!("[demo-app] frame payload too large!");
+        }
+
+        // Advance ring buffer offset
+        current_offset += frame_max_size;
+        if current_offset >= max_offset {
+            current_offset = 24;
+        }
 
         // SubmitFrame
         ControlMessage::SubmitFrame {
