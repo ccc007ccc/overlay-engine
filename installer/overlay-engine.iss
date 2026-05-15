@@ -1,8 +1,8 @@
 #define AppName "overlay-engine"
-#define AppVersion "0.1.0"
+#define AppVersion "0.1.1"
 #define AppPublisher "overlay-engine"
 #define Platform "x64"
-#define StageDir "..\dist\overlay-engine-0.1.0-x64"
+#define StageDir "..\dist\overlay-engine-0.1.1-x64"
 
 [Setup]
 AppId={{9F2A7D2E-1C2B-4BB4-9A9F-0B5F1D8C2E20}

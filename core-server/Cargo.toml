@@ -1,6 +1,6 @@
 [package]
 name = "core-server"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "v1.0 standalone core server for overlay engine"
 publish = false

@@ -16,14 +16,14 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts/build-release.ps1" `
   -Configuration Release `
   -Platform x64 `
-  -Version 0.1.0 `
+  -Version 0.1.1 `
   -SignMode Dev
 ```
 
 输出目录：
 
 ```text
-dist\overlay-engine-0.1.0-x64\
+dist\overlay-engine-0.1.1-x64\
   app\
     core-server.exe
     desktop-window-monitor.exe
@@ -58,7 +58,7 @@ iscc.exe "installer/overlay-engine.iss"
 输出：
 
 ```text
-dist\overlay-engine-0.1.0-x64-Setup.exe
+dist\overlay-engine-0.1.1-x64-Setup.exe
 ```
 
 安装器提供这些组件/任务：
@@ -75,9 +75,9 @@ dist\overlay-engine-0.1.0-x64-Setup.exe
 不生成 Inno 安装器时，可以直接运行 PowerShell 后端：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.0-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.1-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.0-x64" `
+  -SourceDir "dist/overlay-engine-0.1.1-x64" `
   -InstallDir "$env:LOCALAPPDATA\Programs\overlay-engine" `
   -Components Core,DesktopMonitor,GameBarWidget `
   -AutoStart `

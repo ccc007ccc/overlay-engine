@@ -14,7 +14,7 @@
   <Identity
     Name="OverlayWidget"
     Publisher="CN=OverlayWidget Dev"
-    Version="0.1.0.0" />
+    Version="0.1.1.0" />
 
   <!-- PhoneProductId 历史遗留字段，保持非零唯一即可（GUID 已生成） -->
   <mp:PhoneIdentity PhoneProductId="075df491-a4af-4721-a57d-31f23f2c64a6" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>

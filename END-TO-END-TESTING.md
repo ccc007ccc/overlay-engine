@@ -41,18 +41,18 @@ Release 包不发布 `demo-app`、`demo-consumer` 或诊断/实验程序；demo 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts/build-release.ps1" `
   -Configuration Release `
   -Platform x64 `
-  -Version 0.1.0 `
+  -Version 0.1.1 `
   -SignMode Dev
 ```
 
-确认 `dist\overlay-engine-0.1.0-x64\app` 中只有正式组件，不能出现 `demo-*.exe`、`spike-*.exe` 或 `diag-*.exe`。
+确认 `dist\overlay-engine-0.1.1-x64\app` 中只有正式组件，不能出现 `demo-*.exe`、`spike-*.exe` 或 `diag-*.exe`。
 
 ### Core + Desktop monitor
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.0-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.1-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.0-x64" `
+  -SourceDir "dist/overlay-engine-0.1.1-x64" `
   -Components Core,DesktopMonitor `
   -CreateDesktopShortcut `
   -CreateStartMenu
@@ -69,9 +69,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 ### Core + Game Bar widget
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.0-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.1-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.0-x64" `
+  -SourceDir "dist/overlay-engine-0.1.1-x64" `
   -Components Core,GameBarWidget `
   -CreateStartMenu
 ```
@@ -86,9 +86,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 ### AutoStart 与完整卸载
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.0-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.1-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.0-x64" `
+  -SourceDir "dist/overlay-engine-0.1.1-x64" `
   -Components Core,DesktopMonitor,GameBarWidget `
   -AutoStart `
   -CreateDesktopShortcut `

@@ -292,7 +292,7 @@ function Write-UninstallRegistry([string]$RootDir) {
     $uninstallScript = Join-Path $RootDir 'scripts\uninstall.ps1'
     $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$uninstallScript`" -Release -InstallDir `"$RootDir`""
     New-ItemProperty -Path $key -Name DisplayName -Value 'overlay-engine' -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $key -Name DisplayVersion -Value '0.1.0' -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $key -Name DisplayVersion -Value '0.1.1' -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Publisher -Value 'overlay-engine' -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name InstallLocation -Value $RootDir -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name UninstallString -Value $cmd -PropertyType String -Force | Out-Null
@@ -382,7 +382,7 @@ function Invoke-ReleaseInstall {
 
     $state = [ordered]@{
         installDir = $InstallDir
-        version = '0.1.0'
+        version = '0.1.1'
         components = @($Components)
         autoStart = [bool]$AutoStart
         desktopShortcut = [bool]$CreateDesktopShortcut

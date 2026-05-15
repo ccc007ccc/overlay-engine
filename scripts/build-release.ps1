@@ -11,7 +11,7 @@ param(
     [ValidateSet('x64')]
     [string]$Platform = 'x64',
 
-    [string]$Version = '0.1.0',
+    [string]$Version = '0.1.1',
 
     [ValidateSet('Dev', 'Pfx', 'None')]
     [string]$SignMode = 'Dev',
