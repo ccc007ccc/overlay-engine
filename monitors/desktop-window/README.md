@@ -42,7 +42,7 @@ Core:
   SetBuffer + Present
 
 Monitor:
-  RegisterMonitor
+  RegisterMonitorV2 (Core-requested) / RegisterMonitor (manual dev)
   recv CanvasAttached / MonitorLocalSurfaceAttached
   dcomp.CreateSurfaceFromHandle(handle)
   visual.SetContent(wrapper IUnknown)
@@ -55,30 +55,40 @@ Monitor:
 
 ### Release 安装后
 
-正式 release 中，Desktop Window Monitor 是可选组件。选择该组件时，安装器会在安装目录写入：
+正式 release 中，Desktop Window Monitor 是可选组件。选择该组件时，安装器会在安装目录写入 monitor capability catalog：
 
 ```ini
-Launch=desktop-window-monitor.exe
+Monitor.DesktopWindow.Path=desktop-window-monitor.exe
+Monitor.DesktopWindow.MaxInstancesPerApp=16
+Monitor.DesktopWindow.WindowModes=bordered,borderless,borderless-fullscreen
+Monitor.DesktopWindow.Flags=click-through
 ```
 
-`core-server.exe` 启动后会读取同目录的 `config.ini`，并自动拉起 `desktop-window-monitor.exe`。因此普通用户只需要从开始菜单或桌面快捷方式启动 overlay-engine，不需要手动单独启动 monitor。
+`core-server.exe` 启动后只加载能力目录，不会自动拉起 `desktop-window-monitor.exe`。App 通过 Core IPC 的 `ListMonitorTypes` 查询能力，再用 `StartMonitor` 按需启动窗口；App 断开后 Core 会关闭它拥有的 Desktop monitor。
 
 ### 开发模式
 
 ```powershell
-cargo build --release -p desktop-window-monitor
+cargo build --release -p core-server -p desktop-window-monitor
 
 # Terminal 1: Core
 .\target\release\core-server.exe
 
-# Terminal 2: Monitor
-.\target\release\desktop-window-monitor.exe
-
-# Terminal 3: Demo App
-.\target\release\demo-app.exe
+# Terminal 2: Demo App requests two Desktop windows
+.\target\release\demo-app.exe --desktop-monitors 2 --window-mode bordered
 ```
 
-预期：desktop-window monitor 弹出普通 Win32 窗口，显示 `demo-app` 提交的全局画布内容，并在客户区左上角显示 MonitorLocal 的 cyan 徽章/FPS 条。
+可用窗口模式：
+
+```powershell
+.\target\release\demo-app.exe --desktop-monitors 1 --window-mode borderless
+.\target\release\demo-app.exe --desktop-monitors 1 --window-mode fullscreen
+.\target\release\demo-app.exe --desktop-monitors 1 --click-through
+```
+
+手动运行 `desktop-window-monitor.exe` 仍会打开一个 bordered 开发窗口；Core 按需启动时会通过 CLI 参数传入 request/app/canvas/window mode/flags。
+
+预期：desktop-window monitor 弹出 Win32 窗口，显示 `demo-app` 提交的全局画布内容，并在客户区左上角显示 MonitorLocal 的 cyan 徽章/FPS 条。
 
 ## 验证点
 
@@ -93,8 +103,9 @@ cargo build --release -p desktop-window-monitor
 - `dcomp.CreateSurfaceFromHandle + visual.SetContent` 在普通 Win32 进程可用。
 - Win32 monitor 侧具备 viewport transform 所需 API：`visual.SetTransform2(Matrix3x2)`。
 
-## 后续
+## 生命周期
 
-- App 关闭后的 Monitor 生命周期清退由 `canvas-monitor-lifecycle` 后续 Change-D 实现。
-- 单实例 + 多窗口模型由后续 Change-E 实现。
-- Game Bar widget lifecycle 接入不在本阶段范围内。
+- Core 不再自启 Desktop Window Monitor。
+- Desktop Window Monitor 使用 singleton 主进程 + launcher 转发模型，支持同一个 App 请求多个窗口。
+- App 关闭后，Core 会向该 App 拥有且由 Core 启动的 Desktop monitor 发送 `CloseMonitor`。
+- Xbox Game Bar widget 是手动生命周期 monitor，只能由用户通过 `Win+G` 打开。

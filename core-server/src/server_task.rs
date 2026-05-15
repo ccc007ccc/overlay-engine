@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
@@ -14,7 +15,9 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 
 use crate::ipc::cmd_decoder::{BitmapDrawCommand, RenderCommand, SpaceId};
-use crate::ipc::protocol::{ControlMessage, MessageHeader, HEADER_SIZE};
+use crate::ipc::protocol::{
+    ControlMessage, MessageHeader, MonitorKind, MonitorRequestStatus, HEADER_SIZE,
+};
 use crate::renderer::dcomp::{present_manager, AcquireOutcome, PresentOutcome, ACQUIRE_TIMEOUT_MS};
 use crate::renderer::painter::{D2DEngine, DrawCmd};
 
@@ -33,6 +36,20 @@ const RENDER_DURATION_WINDOW: usize = 60;
 /// log (not a crash / backpressure) — the submit path still serves frames,
 /// but operators are alerted.
 const RENDER_DURATION_WARN_MS: u128 = 8;
+const MONITOR_START_TIMEOUT: Duration = Duration::from_secs(5);
+
+type PendingMonitorStartKey = (u32, u32);
+
+struct PendingMonitorStart {
+    app_id: u32,
+    requested_count: u32,
+    monitor_ids: Vec<u32>,
+    tx: tokio::sync::mpsc::UnboundedSender<ControlMessage>,
+}
+
+lazy_static::lazy_static! {
+    static ref PENDING_MONITOR_STARTS: Mutex<HashMap<PendingMonitorStartKey, PendingMonitorStart>> = Mutex::new(HashMap::new());
+}
 
 pub async fn run_server() -> anyhow::Result<()> {
     use std::ffi::CString;
@@ -466,6 +483,66 @@ pub fn broadcast_app_detached(
     }
 }
 
+fn send_start_monitor_result(
+    tx: &tokio::sync::mpsc::UnboundedSender<ControlMessage>,
+    request_id: u32,
+    status: MonitorRequestStatus,
+    monitor_ids: Vec<u32>,
+) {
+    let _ = tx.send(ControlMessage::StartMonitorResult {
+        request_id,
+        status,
+        monitor_ids,
+    });
+}
+
+fn complete_pending_monitor_start(request_id: u32, app_id: u32, monitor_id: u32) {
+    let key = (app_id, request_id);
+    let completed = {
+        let mut pending = PENDING_MONITOR_STARTS.lock().unwrap();
+        let Some(entry) = pending.get_mut(&key) else {
+            return;
+        };
+        entry.monitor_ids.push(monitor_id);
+        if entry.monitor_ids.len() as u32 >= entry.requested_count {
+            let tx = entry.tx.clone();
+            let monitor_ids = entry.monitor_ids.clone();
+            pending.remove(&key);
+            Some((tx, monitor_ids))
+        } else {
+            None
+        }
+    };
+
+    if let Some((tx, monitor_ids)) = completed {
+        send_start_monitor_result(&tx, request_id, MonitorRequestStatus::Ok, monitor_ids);
+    }
+}
+
+fn spawn_pending_monitor_timeout(app_id: u32, request_id: u32) {
+    tokio::spawn(async move {
+        tokio::time::sleep(MONITOR_START_TIMEOUT).await;
+        let timed_out = {
+            let mut pending = PENDING_MONITOR_STARTS.lock().unwrap();
+            pending
+                .remove(&(app_id, request_id))
+                .map(|entry| (entry.tx, entry.monitor_ids))
+        };
+        if let Some((tx, monitor_ids)) = timed_out {
+            send_start_monitor_result(&tx, request_id, MonitorRequestStatus::Timeout, monitor_ids);
+        }
+    });
+}
+
+fn cancel_pending_monitor_starts_for_app(app_id: u32) {
+    let mut pending = PENDING_MONITOR_STARTS.lock().unwrap();
+    pending.retain(|_, entry| entry.app_id != app_id);
+}
+
+fn send_close_monitor(tx: &tokio::sync::mpsc::UnboundedSender<ControlMessage>, monitor_id: u32) {
+    let _ = tx.send(ControlMessage::CloseMonitor { monitor_id });
+}
+
 async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
     let (mut rh, mut wh) = tokio::io::split(pipe);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ControlMessage>();
@@ -551,6 +628,42 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                     client_id = Some((id, false));
                     println!("Registered Monitor with ID: {} (PID: {})", id, pid);
                 }
+                ControlMessage::RegisterMonitorV2 {
+                    pid,
+                    kind,
+                    owner_app_id,
+                    request_id,
+                    target_canvas_id,
+                    mode,
+                    flags,
+                    manual_lifecycle,
+                } => {
+                    let owner_app_id_opt = (owner_app_id != 0).then_some(owner_app_id);
+                    let request_id_opt = (request_id != 0).then_some(request_id);
+                    let target_canvas_id_opt = (target_canvas_id != 0).then_some(target_canvas_id);
+                    let (id, should_close) = {
+                        let mut state = crate::ipc::server::SERVER_STATE.write();
+                        state.register_monitor_v2(
+                            pid,
+                            windows::Win32::Foundation::HANDLE::default(),
+                            tx.clone(),
+                            kind,
+                            owner_app_id_opt,
+                            request_id_opt,
+                            target_canvas_id_opt,
+                            mode,
+                            flags,
+                            manual_lifecycle,
+                        )
+                    };
+                    client_id = Some((id, false));
+                    println!("Registered {:?} Monitor with ID: {} (PID: {})", kind, id, pid);
+                    if should_close {
+                        send_close_monitor(&tx, id);
+                    } else if request_id != 0 && owner_app_id != 0 {
+                        complete_pending_monitor_start(request_id, owner_app_id, id);
+                    }
+                }
                 ControlMessage::CreateCanvas {
                     logical_w,
                     logical_h,
@@ -584,6 +697,201 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                         eprintln!(
                             "Error: AttachMonitor received but client is not a registered app"
                         );
+                    }
+                }
+                ControlMessage::ListMonitorTypes { request_id } => {
+                    if let Some((_app_id, true)) = client_id {
+                        let entries = crate::process_manager::get_monitor_catalog().to_monitor_type_entries();
+                        let _ = tx.send(ControlMessage::MonitorTypes { request_id, entries });
+                    } else {
+                        eprintln!("ListMonitorTypes received but client is not a registered app");
+                    }
+                }
+                ControlMessage::StartMonitor {
+                    request_id,
+                    kind,
+                    count,
+                    target_canvas_id,
+                    mode,
+                    flags,
+                    x,
+                    y,
+                    w,
+                    h,
+                } => {
+                    let Some((app_id, true)) = client_id else {
+                        send_start_monitor_result(&tx, request_id, MonitorRequestStatus::NotOwner, Vec::new());
+                        continue;
+                    };
+
+                    if count == 0 {
+                        send_start_monitor_result(&tx, request_id, MonitorRequestStatus::Ok, Vec::new());
+                        continue;
+                    }
+
+                    match kind {
+                        MonitorKind::GameBar => {
+                            send_start_monitor_result(
+                                &tx,
+                                request_id,
+                                MonitorRequestStatus::ManualOpenRequired,
+                                Vec::new(),
+                            );
+                        }
+                        MonitorKind::DesktopWindow => {
+                            let catalog = crate::process_manager::get_monitor_catalog();
+                            let Some(desktop) = catalog.desktop_window else {
+                                send_start_monitor_result(
+                                    &tx,
+                                    request_id,
+                                    MonitorRequestStatus::Unavailable,
+                                    Vec::new(),
+                                );
+                                continue;
+                            };
+
+                            if desktop.window_modes & mode.bit() == 0 || flags & !desktop.flags != 0 {
+                                send_start_monitor_result(
+                                    &tx,
+                                    request_id,
+                                    MonitorRequestStatus::Unavailable,
+                                    Vec::new(),
+                                );
+                                continue;
+                            }
+
+                            let (resolved_target_canvas_id, existing_count) = {
+                                let state = crate::ipc::server::SERVER_STATE.read();
+                                let existing_count = state
+                                    .monitors
+                                    .values()
+                                    .filter(|monitor| {
+                                        monitor.kind == MonitorKind::DesktopWindow
+                                            && monitor.owner_app_id == Some(app_id)
+                                            && monitor.core_managed
+                                    })
+                                    .count() as u32;
+                                (
+                                    state.resolve_app_canvas_id(app_id, target_canvas_id),
+                                    existing_count,
+                                )
+                            };
+                            let Some(target_canvas_id) = resolved_target_canvas_id else {
+                                send_start_monitor_result(
+                                    &tx,
+                                    request_id,
+                                    MonitorRequestStatus::InvalidCanvas,
+                                    Vec::new(),
+                                );
+                                continue;
+                            };
+                            if existing_count.saturating_add(count) > desktop.max_instances_per_app {
+                                send_start_monitor_result(
+                                    &tx,
+                                    request_id,
+                                    MonitorRequestStatus::LimitExceeded,
+                                    Vec::new(),
+                                );
+                                continue;
+                            }
+
+                            {
+                                let mut pending = PENDING_MONITOR_STARTS.lock().unwrap();
+                                pending.insert(
+                                    (app_id, request_id),
+                                    PendingMonitorStart {
+                                        app_id,
+                                        requested_count: count,
+                                        monitor_ids: Vec::new(),
+                                        tx: tx.clone(),
+                                    },
+                                );
+                            }
+
+                            let mut started_count = 0u32;
+                            for _ in 0..count {
+                                let result = crate::process_manager::start_desktop_window_monitor(
+                                    crate::process_manager::DesktopWindowLaunchOptions {
+                                        request_id,
+                                        owner_app_id: app_id,
+                                        target_canvas_id,
+                                        mode,
+                                        flags,
+                                        x,
+                                        y,
+                                        w,
+                                        h,
+                                    },
+                                );
+                                match result {
+                                    Ok(_) => started_count += 1,
+                                    Err(e) => eprintln!(
+                                        "StartMonitor: Desktop Window Monitor spawn failed: {}",
+                                        e
+                                    ),
+                                }
+                            }
+
+                            if started_count == 0 {
+                                PENDING_MONITOR_STARTS
+                                    .lock()
+                                    .unwrap()
+                                    .remove(&(app_id, request_id));
+                                send_start_monitor_result(
+                                    &tx,
+                                    request_id,
+                                    MonitorRequestStatus::SpawnFailed,
+                                    Vec::new(),
+                                );
+                                continue;
+                            }
+
+                            let completed = if started_count < count {
+                                let mut pending = PENDING_MONITOR_STARTS.lock().unwrap();
+                                if let Some(entry) = pending.get_mut(&(app_id, request_id)) {
+                                    entry.requested_count = started_count;
+                                    if entry.monitor_ids.len() as u32 >= started_count {
+                                        let tx = entry.tx.clone();
+                                        let monitor_ids = entry.monitor_ids.clone();
+                                        pending.remove(&(app_id, request_id));
+                                        Some((tx, monitor_ids))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some((pending_tx, monitor_ids)) = completed {
+                                send_start_monitor_result(
+                                    &pending_tx,
+                                    request_id,
+                                    MonitorRequestStatus::Ok,
+                                    monitor_ids,
+                                );
+                            } else {
+                                spawn_pending_monitor_timeout(app_id, request_id);
+                            }
+                        }
+                    }
+                }
+                ControlMessage::StopMonitor { request_id, monitor_id } => {
+                    if let Some((app_id, true)) = client_id {
+                        let (status, monitor_tx) = {
+                            let state = crate::ipc::server::SERVER_STATE.read();
+                            state.close_monitor_if_owned(app_id, monitor_id)
+                        };
+                        if let Some(monitor_tx) = monitor_tx {
+                            send_close_monitor(&monitor_tx, monitor_id);
+                        }
+                        let _ = tx.send(ControlMessage::StopMonitorResult { request_id, status });
+                    } else {
+                        let _ = tx.send(ControlMessage::StopMonitorResult {
+                            request_id,
+                            status: MonitorRequestStatus::NotOwner,
+                        });
                     }
                 }
                 ControlMessage::LoadBitmap { bitmap_id, bytes } => {
@@ -654,26 +962,25 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                             let usage = scan_targets(&cmds);
                             let snapshot = {
                                 let state = crate::ipc::server::SERVER_STATE.read();
-                                state.apps.get(&app_id).and_then(|app| {
-                                    let resolved_canvas_id = if canvas_id == 0 {
-                                        app.canvas_ids.first().copied().unwrap_or(0)
-                                    } else {
-                                        canvas_id
-                                    };
-                                    state.canvases.get(&resolved_canvas_id).map(|canvas| {
-                                        (
-                                            resolved_canvas_id,
-                                            snapshot_submit_frame_targets(
-                                                canvas,
-                                                resolved_canvas_id,
-                                                frame_id,
-                                                &usage,
-                                            ),
-                                            state.devices.clone(),
-                                            app.bitmap_handles.clone(),
-                                        )
+                                state
+                                    .resolve_app_canvas_id(app_id, canvas_id)
+                                    .and_then(|resolved_canvas_id| {
+                                        state.apps.get(&app_id).and_then(|app| {
+                                            state.canvases.get(&resolved_canvas_id).map(|canvas| {
+                                                (
+                                                    resolved_canvas_id,
+                                                    snapshot_submit_frame_targets(
+                                                        canvas,
+                                                        resolved_canvas_id,
+                                                        frame_id,
+                                                        &usage,
+                                                    ),
+                                                    state.devices.clone(),
+                                                    app.bitmap_handles.clone(),
+                                                )
+                                            })
+                                        })
                                     })
-                                })
                             };
 
                             if let Some((resolved_canvas_id, targets, devices, bitmap_handles)) = snapshot {
@@ -710,6 +1017,10 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
         let mut state = crate::ipc::server::SERVER_STATE.write();
         if is_app {
             println!("Cleaning up App {}", id);
+            cancel_pending_monitor_starts_for_app(id);
+            for (monitor_id, monitor_tx) in state.close_owned_desktop_monitors(id) {
+                send_close_monitor(&monitor_tx, monitor_id);
+            }
 
             // Task 6.2: Broadcast AppDetached before remove_app
             broadcast_app_detached(&state, id, detach_reason);

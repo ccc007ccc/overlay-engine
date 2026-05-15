@@ -4,6 +4,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use windows::Win32::Foundation::HANDLE;
 
+use crate::ipc::protocol::{ControlMessage, DesktopWindowMode, MonitorKind};
 use crate::ipc::shmem::SharedMemory;
 use crate::renderer::dcomp::{CanvasResources, CoreDevices, PerMonitorResources};
 use crate::renderer::resources::BitmapHandle;
@@ -46,7 +47,16 @@ pub struct Monitor {
     pub id: u32,
     pub pid: u32,
     pub handle: HANDLE,
-    pub tx: tokio::sync::mpsc::UnboundedSender<crate::ipc::protocol::ControlMessage>,
+    pub tx: tokio::sync::mpsc::UnboundedSender<ControlMessage>,
+    pub kind: MonitorKind,
+    pub owner_app_id: Option<u32>,
+    pub target_canvas_id: Option<u32>,
+    pub start_request_id: Option<u32>,
+    pub core_managed: bool,
+    pub manual_lifecycle: bool,
+    pub mode: DesktopWindowMode,
+    pub flags: u32,
+    pub auto_attach: bool,
 }
 
 pub struct ServerState {
@@ -102,7 +112,7 @@ impl ServerState {
         &mut self,
         pid: u32,
         handle: HANDLE,
-        tx: tokio::sync::mpsc::UnboundedSender<crate::ipc::protocol::ControlMessage>,
+        tx: tokio::sync::mpsc::UnboundedSender<ControlMessage>,
     ) -> u32 {
         let id = self.next_monitor_id;
         self.next_monitor_id += 1;
@@ -113,10 +123,18 @@ impl ServerState {
                 pid,
                 handle,
                 tx,
+                kind: MonitorKind::DesktopWindow,
+                owner_app_id: None,
+                target_canvas_id: None,
+                start_request_id: None,
+                core_managed: false,
+                manual_lifecycle: false,
+                mode: DesktopWindowMode::Bordered,
+                flags: 0,
+                auto_attach: true,
             },
         );
 
-        // auto-attach to all existing canvases
         let canvas_ids: Vec<u32> = self.canvases.keys().copied().collect();
         for cid in canvas_ids {
             if let Err(e) = self.attach_monitor(cid, id) {
@@ -125,6 +143,71 @@ impl ServerState {
         }
 
         id
+    }
+
+    pub fn register_monitor_v2(
+        &mut self,
+        pid: u32,
+        handle: HANDLE,
+        tx: tokio::sync::mpsc::UnboundedSender<ControlMessage>,
+        kind: MonitorKind,
+        owner_app_id: Option<u32>,
+        request_id: Option<u32>,
+        target_canvas_id: Option<u32>,
+        mode: DesktopWindowMode,
+        flags: u32,
+        manual_lifecycle: bool,
+    ) -> (u32, bool) {
+        let id = self.next_monitor_id;
+        self.next_monitor_id += 1;
+        let auto_attach = kind == MonitorKind::GameBar || owner_app_id.is_none();
+        let core_managed =
+            kind == MonitorKind::DesktopWindow && owner_app_id.is_some() && !manual_lifecycle;
+        self.monitors.insert(
+            id,
+            Monitor {
+                id,
+                pid,
+                handle,
+                tx,
+                kind,
+                owner_app_id,
+                target_canvas_id,
+                start_request_id: request_id,
+                core_managed,
+                manual_lifecycle,
+                mode,
+                flags,
+                auto_attach,
+            },
+        );
+
+        if kind == MonitorKind::DesktopWindow {
+            if let (Some(app_id), Some(canvas_id)) = (owner_app_id, target_canvas_id) {
+                if !self.app_owns_canvas(app_id, canvas_id) {
+                    return (id, true);
+                }
+                if let Err(e) = self.attach_monitor(canvas_id, id) {
+                    eprintln!(
+                        "attach Desktop monitor {} to canvas {} failed: {}",
+                        id, canvas_id, e
+                    );
+                    return (id, true);
+                }
+                return (id, false);
+            }
+        }
+
+        if auto_attach {
+            let canvas_ids: Vec<u32> = self.canvases.keys().copied().collect();
+            for cid in canvas_ids {
+                if let Err(e) = self.attach_monitor(cid, id) {
+                    eprintln!("auto-attach monitor {} to canvas {} failed: {}", id, cid, e);
+                }
+            }
+        }
+
+        (id, false)
     }
 
     pub fn create_canvas(
@@ -162,8 +245,11 @@ impl ServerState {
             );
             app.canvas_ids.push(id);
 
-            // auto-attach all existing monitors
-            let monitor_ids: Vec<u32> = self.monitors.keys().copied().collect();
+            let monitor_ids: Vec<u32> = self
+                .monitors
+                .iter()
+                .filter_map(|(monitor_id, monitor)| monitor.auto_attach.then_some(*monitor_id))
+                .collect();
             for cid in monitor_ids {
                 if let Err(e) = self.attach_monitor(id, cid) {
                     eprintln!("auto-attach monitor {} to canvas {} failed: {}", cid, id, e);
@@ -174,6 +260,64 @@ impl ServerState {
         } else {
             Err(anyhow::anyhow!("App not found"))
         }
+    }
+
+    pub fn app_owns_canvas(&self, app_id: u32, canvas_id: u32) -> bool {
+        self.apps
+            .get(&app_id)
+            .is_some_and(|app| app.canvas_ids.contains(&canvas_id))
+    }
+
+    pub fn resolve_app_canvas_id(&self, app_id: u32, requested_canvas_id: u32) -> Option<u32> {
+        if requested_canvas_id == 0 {
+            self.apps
+                .get(&app_id)
+                .and_then(|app| app.canvas_ids.first().copied())
+        } else {
+            self.app_owns_canvas(app_id, requested_canvas_id)
+                .then_some(requested_canvas_id)
+        }
+    }
+
+    pub fn close_owned_desktop_monitors(
+        &self,
+        app_id: u32,
+    ) -> Vec<(u32, tokio::sync::mpsc::UnboundedSender<ControlMessage>)> {
+        self.monitors
+            .iter()
+            .filter_map(|(id, monitor)| {
+                (monitor.kind == MonitorKind::DesktopWindow
+                    && monitor.owner_app_id == Some(app_id)
+                    && monitor.core_managed)
+                    .then_some((*id, monitor.tx.clone()))
+            })
+            .collect()
+    }
+
+    pub fn close_monitor_if_owned(
+        &self,
+        app_id: u32,
+        monitor_id: u32,
+    ) -> (
+        crate::ipc::protocol::MonitorRequestStatus,
+        Option<tokio::sync::mpsc::UnboundedSender<ControlMessage>>,
+    ) {
+        let Some(monitor) = self.monitors.get(&monitor_id) else {
+            return (crate::ipc::protocol::MonitorRequestStatus::NotFound, None);
+        };
+        if monitor.owner_app_id != Some(app_id) {
+            return (crate::ipc::protocol::MonitorRequestStatus::NotOwner, None);
+        }
+        if !monitor.core_managed || monitor.manual_lifecycle {
+            return (
+                crate::ipc::protocol::MonitorRequestStatus::NotCoreManaged,
+                None,
+            );
+        }
+        (
+            crate::ipc::protocol::MonitorRequestStatus::Ok,
+            Some(monitor.tx.clone()),
+        )
     }
 
     pub fn remove_app(&mut self, id: u32) {

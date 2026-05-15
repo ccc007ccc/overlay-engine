@@ -1,7 +1,9 @@
 use bytes::{Buf, BufMut, BytesMut};
+use core_server::ipc::protocol::DesktopWindowMode;
 
 pub const SINGLETON_PIPE_NAME: &str = r"\\.\pipe\overlay-desktop-window-monitor-singleton";
 pub const SINGLETON_OP_OPEN_WINDOW: u16 = 0x0101;
+pub const SINGLETON_OP_OPEN_WINDOW_V2: u16 = 0x0102;
 pub const SINGLETON_OP_ACK: u16 = 0x0201;
 pub const SINGLETON_OP_NACK: u16 = 0x0202;
 const SINGLETON_HEADER_SIZE: usize = 6;
@@ -11,12 +13,26 @@ pub enum SingletonFrameError {
     BufferTooSmall { expected: usize, actual: usize },
     UnknownOpcode(u16),
     PayloadLengthMismatch { expected: u32, actual: u32 },
+    InvalidMode(u8),
     Utf8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SingletonRequest {
-    OpenWindow { target_canvas_id: u32 },
+    OpenWindow {
+        target_canvas_id: u32,
+    },
+    OpenWindowV2 {
+        request_id: u32,
+        owner_app_id: u32,
+        target_canvas_id: u32,
+        mode: DesktopWindowMode,
+        flags: u32,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,24 +84,26 @@ pub fn handle_singleton_request(
     req: SingletonRequest,
     state: &mut SingletonState,
 ) -> SingletonResponse {
-    match req {
-        SingletonRequest::OpenWindow { target_canvas_id } => {
-            let new_monitor_id = state
-                .registered_windows
-                .iter()
-                .map(|w| w.monitor_id)
-                .max()
-                .unwrap_or(0)
-                .saturating_add(1);
-            state.registered_windows.push(MonitorWindowSnapshot {
-                monitor_id: new_monitor_id,
-                target_canvas_id,
-            });
-            SingletonResponse::Ack {
-                pid: state.monitor_process_pid,
-                new_monitor_id,
-            }
-        }
+    let target_canvas_id = match req {
+        SingletonRequest::OpenWindow { target_canvas_id } => target_canvas_id,
+        SingletonRequest::OpenWindowV2 {
+            target_canvas_id, ..
+        } => target_canvas_id,
+    };
+    let new_monitor_id = state
+        .registered_windows
+        .iter()
+        .map(|w| w.monitor_id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    state.registered_windows.push(MonitorWindowSnapshot {
+        monitor_id: new_monitor_id,
+        target_canvas_id,
+    });
+    SingletonResponse::Ack {
+        pid: state.monitor_process_pid,
+        new_monitor_id,
     }
 }
 
@@ -100,6 +118,29 @@ pub fn encode_request(req: SingletonRequest, buf: &mut BytesMut) {
             buf.put_u32_le(4);
             buf.put_u32_le(target_canvas_id);
         }
+        SingletonRequest::OpenWindowV2 {
+            request_id,
+            owner_app_id,
+            target_canvas_id,
+            mode,
+            flags,
+            x,
+            y,
+            w,
+            h,
+        } => {
+            buf.put_u16_le(SINGLETON_OP_OPEN_WINDOW_V2);
+            buf.put_u32_le(33);
+            buf.put_u32_le(request_id);
+            buf.put_u32_le(owner_app_id);
+            buf.put_u32_le(target_canvas_id);
+            buf.put_u8(mode as u8);
+            buf.put_u32_le(flags);
+            buf.put_i32_le(x);
+            buf.put_i32_le(y);
+            buf.put_u32_le(w);
+            buf.put_u32_le(h);
+        }
     }
 }
 
@@ -111,6 +152,27 @@ pub fn decode_request(buf: &mut BytesMut) -> Result<SingletonRequest, SingletonF
             require_remaining(buf, 4)?;
             Ok(SingletonRequest::OpenWindow {
                 target_canvas_id: buf.get_u32_le(),
+            })
+        }
+        SINGLETON_OP_OPEN_WINDOW_V2 => {
+            require_len(len, 33)?;
+            require_remaining(buf, 33)?;
+            let request_id = buf.get_u32_le();
+            let owner_app_id = buf.get_u32_le();
+            let target_canvas_id = buf.get_u32_le();
+            let mode_value = buf.get_u8();
+            let mode = DesktopWindowMode::from_wire(mode_value)
+                .map_err(|_| SingletonFrameError::InvalidMode(mode_value))?;
+            Ok(SingletonRequest::OpenWindowV2 {
+                request_id,
+                owner_app_id,
+                target_canvas_id,
+                mode,
+                flags: buf.get_u32_le(),
+                x: buf.get_i32_le(),
+                y: buf.get_i32_le(),
+                w: buf.get_u32_le(),
+                h: buf.get_u32_le(),
             })
         }
         _ => Err(SingletonFrameError::UnknownOpcode(opcode)),
@@ -228,6 +290,21 @@ mod tests {
     fn request_and_response_roundtrip() {
         let req = SingletonRequest::OpenWindow {
             target_canvas_id: 7,
+        };
+        let mut buf = BytesMut::new();
+        encode_request(req, &mut buf);
+        assert_eq!(decode_request(&mut buf).unwrap(), req);
+
+        let req = SingletonRequest::OpenWindowV2 {
+            request_id: 9,
+            owner_app_id: 10,
+            target_canvas_id: 11,
+            mode: DesktopWindowMode::BorderlessFullscreen,
+            flags: 1,
+            x: -10,
+            y: 20,
+            w: 1920,
+            h: 1080,
         };
         let mut buf = BytesMut::new();
         encode_request(req, &mut buf);

@@ -1,6 +1,9 @@
 use bytes::BytesMut;
-use core_server::ipc::protocol::ControlMessage;
-use tokio::io::AsyncWriteExt;
+use core_server::ipc::protocol::{
+    ControlMessage, DesktopWindowMode, MessageHeader, MonitorKind, MonitorRequestStatus,
+    MonitorTypeEntry, DESKTOP_WINDOW_FLAG_CLICK_THROUGH, HEADER_SIZE,
+};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::windows::named_pipe::ClientOptions;
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::UI::HiDpi::{
@@ -31,6 +34,157 @@ const TEXTURE_STRIPES: u32 = 3;
 static ORB_PNG: &[u8] = include_bytes!("../../assets/demo-textures/orb.png");
 static GRID_PNG: &[u8] = include_bytes!("../../assets/demo-textures/grid.png");
 static STRIPES_PNG: &[u8] = include_bytes!("../../assets/demo-textures/stripes.png");
+
+#[derive(Debug, Clone, Copy)]
+struct DemoOptions {
+    unlocked: bool,
+    desktop_monitors: u32,
+    window_mode: DesktopWindowMode,
+    click_through: bool,
+}
+
+impl Default for DemoOptions {
+    fn default() -> Self {
+        Self {
+            unlocked: false,
+            desktop_monitors: 0,
+            window_mode: DesktopWindowMode::Bordered,
+            click_through: false,
+        }
+    }
+}
+
+fn parse_demo_options() -> anyhow::Result<Option<DemoOptions>> {
+    let mut options = DemoOptions::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--unlocked" | "--no-vsync" => options.unlocked = true,
+            "--desktop-monitors" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--desktop-monitors requires a count"))?;
+                options.desktop_monitors = value.parse()?;
+            }
+            "--window-mode" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--window-mode requires a value"))?;
+                options.window_mode = parse_window_mode(&value)?;
+            }
+            "--click-through" => options.click_through = true,
+            "-h" | "--help" => {
+                print_usage();
+                return Ok(None);
+            }
+            _ => anyhow::bail!("unknown argument: {arg}"),
+        }
+    }
+    Ok(Some(options))
+}
+
+fn parse_window_mode(value: &str) -> anyhow::Result<DesktopWindowMode> {
+    match value {
+        "bordered" => Ok(DesktopWindowMode::Bordered),
+        "borderless" => Ok(DesktopWindowMode::Borderless),
+        "borderless-fullscreen" | "fullscreen" => Ok(DesktopWindowMode::BorderlessFullscreen),
+        _ => anyhow::bail!("unknown window mode: {value}"),
+    }
+}
+
+fn window_mode_label(mode: DesktopWindowMode) -> &'static str {
+    match mode {
+        DesktopWindowMode::Bordered => "bordered",
+        DesktopWindowMode::Borderless => "borderless",
+        DesktopWindowMode::BorderlessFullscreen => "borderless-fullscreen",
+    }
+}
+
+fn print_usage() {
+    println!("Usage: demo-app [--unlocked] [--desktop-monitors N] [--window-mode bordered|borderless|fullscreen] [--click-through]");
+}
+
+async fn send_control_message<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    msg: ControlMessage,
+    buf: &mut BytesMut,
+) -> anyhow::Result<()> {
+    msg.encode(buf);
+    writer.write_all(buf).await?;
+    buf.clear();
+    Ok(())
+}
+
+async fn read_control_message<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> anyhow::Result<Option<ControlMessage>> {
+    let mut header_buf = [0u8; HEADER_SIZE];
+    reader.read_exact(&mut header_buf).await?;
+    let mut header_bytes = BytesMut::from(&header_buf[..]);
+    let header = MessageHeader::decode(&mut header_bytes)?;
+
+    let mut payload_buf = vec![0u8; header.payload_len as usize];
+    if !payload_buf.is_empty() {
+        reader.read_exact(&mut payload_buf).await?;
+    }
+    let mut payload = BytesMut::from(&payload_buf[..]);
+    Ok(ControlMessage::decode(
+        header.opcode,
+        header.payload_len,
+        &mut payload,
+    )?)
+}
+
+async fn wait_monitor_types<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    request_id: u32,
+) -> anyhow::Result<Vec<MonitorTypeEntry>> {
+    loop {
+        if let Some(ControlMessage::MonitorTypes {
+            request_id: id,
+            entries,
+        }) = read_control_message(reader).await?
+        {
+            if id == request_id {
+                return Ok(entries);
+            }
+        }
+    }
+}
+
+async fn wait_start_monitor_result<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    request_id: u32,
+) -> anyhow::Result<(MonitorRequestStatus, Vec<u32>)> {
+    loop {
+        if let Some(ControlMessage::StartMonitorResult {
+            request_id: id,
+            status,
+            monitor_ids,
+        }) = read_control_message(reader).await?
+        {
+            if id == request_id {
+                return Ok((status, monitor_ids));
+            }
+        }
+    }
+}
+
+fn print_monitor_catalog(entries: &[MonitorTypeEntry]) {
+    for entry in entries {
+        println!(
+            "[demo-app] Monitor {:?}: available={} policy={:?} max={} core_startable={} core_managed={} modes=0x{:x} flags=0x{:x}",
+            entry.kind,
+            entry.available,
+            entry.start_policy,
+            entry.max_instances,
+            entry.core_startable,
+            entry.core_managed,
+            entry.window_modes,
+            entry.flags
+        );
+    }
+}
 
 fn write_f32(buf: &mut [u8], pos: &mut usize, v: f32) {
     buf[*pos..*pos + 4].copy_from_slice(&v.to_le_bytes());
@@ -532,14 +686,15 @@ fn write_complex_animation_scene(buf: &mut [u8], pos: &mut usize, cw: f32, ch: f
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let unlocked = args.iter().any(|a| a == "--unlocked" || a == "--no-vsync");
+    let Some(options) = parse_demo_options()? else {
+        return Ok(());
+    };
 
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as u32;
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1) as u32;
     println!("[demo-app] 屏幕分辨率: {}x{}", screen_w, screen_h);
-    if unlocked {
+    if options.unlocked {
         println!("[demo-app] 模式: 无帧数限制 (Unlocked)");
     } else {
         println!("[demo-app] 模式: DWM VSync (锁定帧率)");
@@ -562,13 +717,14 @@ async fn main() -> anyhow::Result<()> {
 
     let mut buf = BytesMut::new();
 
-    // RegisterApp
-    ControlMessage::RegisterApp {
-        pid: std::process::id(),
-    }
-    .encode(&mut buf);
-    client.write_all(&buf).await?;
-    buf.clear();
+    send_control_message(
+        &mut client,
+        ControlMessage::RegisterApp {
+            pid: std::process::id(),
+        },
+        &mut buf,
+    )
+    .await?;
     println!("[demo-app] 已注册 App");
 
     // 等 server 处理 RegisterApp 并创建共享内存
@@ -579,27 +735,82 @@ async fn main() -> anyhow::Result<()> {
         (TEXTURE_GRID, "grid", GRID_PNG),
         (TEXTURE_STRIPES, "stripes", STRIPES_PNG),
     ] {
-        ControlMessage::LoadBitmap {
-            bitmap_id,
-            bytes: bytes.to_vec(),
-        }
-        .encode(&mut buf);
-        client.write_all(&buf).await?;
-        buf.clear();
+        send_control_message(
+            &mut client,
+            ControlMessage::LoadBitmap {
+                bitmap_id,
+                bytes: bytes.to_vec(),
+            },
+            &mut buf,
+        )
+        .await?;
         println!("[demo-app] 已上传贴图: {} (id={})", name, bitmap_id);
     }
 
-    // CreateCanvas（点对点）
-    ControlMessage::CreateCanvas {
-        logical_w: screen_w,
-        logical_h: screen_h,
-        render_w: screen_w,
-        render_h: screen_h,
-    }
-    .encode(&mut buf);
-    client.write_all(&buf).await?;
-    buf.clear();
+    send_control_message(
+        &mut client,
+        ControlMessage::CreateCanvas {
+            logical_w: screen_w,
+            logical_h: screen_h,
+            render_w: screen_w,
+            render_h: screen_h,
+        },
+        &mut buf,
+    )
+    .await?;
     println!("[demo-app] 已创建画布 {}x{}", screen_w, screen_h);
+
+    let list_request_id = 1;
+    send_control_message(
+        &mut client,
+        ControlMessage::ListMonitorTypes {
+            request_id: list_request_id,
+        },
+        &mut buf,
+    )
+    .await?;
+    let monitor_entries = wait_monitor_types(&mut client, list_request_id).await?;
+    print_monitor_catalog(&monitor_entries);
+
+    if options.desktop_monitors > 0 {
+        let start_request_id = 2;
+        let flags = if options.click_through {
+            DESKTOP_WINDOW_FLAG_CLICK_THROUGH
+        } else {
+            0
+        };
+        println!(
+            "[demo-app] 请求启动 {} 个 Desktop monitor，mode={} click_through={}",
+            options.desktop_monitors,
+            window_mode_label(options.window_mode),
+            options.click_through
+        );
+        send_control_message(
+            &mut client,
+            ControlMessage::StartMonitor {
+                request_id: start_request_id,
+                kind: MonitorKind::DesktopWindow,
+                count: options.desktop_monitors,
+                target_canvas_id: 0,
+                mode: options.window_mode,
+                flags,
+                x: 100,
+                y: 100,
+                w: 720,
+                h: 420,
+            },
+            &mut buf,
+        )
+        .await?;
+        let (status, monitor_ids) =
+            wait_start_monitor_result(&mut client, start_request_id).await?;
+        if status != MonitorRequestStatus::Ok {
+            anyhow::bail!("StartMonitor failed: {status:?}");
+        }
+        println!("[demo-app] Desktop monitor 已启动: {:?}", monitor_ids);
+    } else {
+        println!("[demo-app] 未请求 Desktop monitor；可手动打开 Game Bar widget 或使用 --desktop-monitors N");
+    }
 
     // 打开共享内存
     let shmem_name = format!("overlay-core-cmds-{}", std::process::id());
@@ -857,18 +1068,19 @@ async fn main() -> anyhow::Result<()> {
             current_offset = 24;
         }
 
-        // SubmitFrame
-        ControlMessage::SubmitFrame {
-            canvas_id: 0,
-            frame_id,
-            offset: cmd_offset,
-            length: cmd_length,
-        }
-        .encode(&mut buf);
-        client.write_all(&buf).await?;
-        buf.clear();
+        send_control_message(
+            &mut client,
+            ControlMessage::SubmitFrame {
+                canvas_id: 0,
+                frame_id,
+                offset: cmd_offset,
+                length: cmd_length,
+            },
+            &mut buf,
+        )
+        .await?;
 
-        if !unlocked {
+        if !options.unlocked {
             if let Err(e) = unsafe { DwmFlush() } {
                 eprintln!("[demo-app] DwmFlush failed: {}", e);
                 tokio::task::yield_now().await;

@@ -105,7 +105,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Progr
 ## Smoke test
 
 1. 安装 Core + Desktop Window Monitor 后，从开始菜单启动 `Start overlay-engine`。
-2. 确认 core-server 读取安装目录下的 `config.ini`，并自动拉起 `desktop-window-monitor.exe`。
-3. 安装 Game Bar widget 后，按 `Win+G` 打开 Xbox Game Bar，确认能打开 `Overlay Widget`。
-4. 选择开机自启后，注销/重新登录，确认 `overlay-engine Core` 计划任务触发并启动 core-server。
-5. 卸载后确认没有残留计划任务、快捷方式、MSIX 和安装目录。
+2. 确认 core-server 读取安装目录下的 `config.ini`，且不会自动拉起 `desktop-window-monitor.exe`。
+3. 用 app 发送 `ListMonitorTypes` 能看到 Desktop Window Monitor 能力；发送 `StartMonitor` 后才出现 Desktop 窗口，app 退出后窗口关闭。
+4. 安装 Game Bar widget 后，按 `Win+G` 打开 Xbox Game Bar，确认能打开 `Overlay Widget`；Core 不负责唤起或关闭它。
+5. 选择开机自启后，注销/重新登录，确认 `overlay-engine Core` 计划任务触发并只启动 core-server。
+6. 卸载后确认没有残留计划任务、快捷方式、MSIX 和安装目录。

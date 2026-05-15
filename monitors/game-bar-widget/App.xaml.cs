@@ -44,6 +44,12 @@ namespace OverlayWidget
             //   不要重复创建。
             if (widgetArgs.IsLaunchActivation)
             {
+                if (mainWidget != null)
+                {
+                    Window.Current.Activate();
+                    return;
+                }
+
                 var rootFrame = new Frame();
                 rootFrame.NavigationFailed += OnNavigationFailed;
                 Window.Current.Content = rootFrame;

@@ -1,5 +1,8 @@
 use bytes::BytesMut;
-use core_server::ipc::protocol::{ControlMessage, MessageHeader, HEADER_SIZE};
+use core_server::ipc::protocol::{
+    ControlMessage, DesktopWindowMode, MessageHeader, MonitorKind,
+    DESKTOP_WINDOW_FLAG_CLICK_THROUGH, HEADER_SIZE,
+};
 use desktop_window::singleton::{
     decode_request, decode_response, encode_request, encode_response, launcher_log_line,
     SingletonRequest, SingletonResponse, SINGLETON_PIPE_NAME,
@@ -27,7 +30,9 @@ use windows::Win32::Graphics::DirectComposition::{
     IDCompositionVisual, IDCompositionVisual2, DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice};
-use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::Graphics::Gdi::{
+    ClientToScreen, GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -35,9 +40,10 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetWindowLongPtrW, LoadCursorW, PeekMessageW, RegisterClassExW, SetWindowLongPtrW,
-    SetWindowTextW, ShowWindow, TranslateMessage, GWLP_USERDATA, IDC_ARROW, MSG, PM_REMOVE,
-    SW_SHOW, WM_CLOSE, WM_DESTROY, WM_QUIT, WM_WINDOWPOSCHANGED, WNDCLASSEXW, WNDCLASS_STYLES,
-    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    SetWindowTextW, ShowWindow, TranslateMessage, GWLP_USERDATA, HTTRANSPARENT, IDC_ARROW, MSG,
+    PM_REMOVE, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_NCHITTEST, WM_QUIT, WM_WINDOWPOSCHANGED,
+    WNDCLASSEXW, WNDCLASS_STYLES, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TRANSPARENT,
+    WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\overlay-core";
@@ -55,6 +61,7 @@ struct ViewportState {
     render_w: u32,
     render_h: u32,
     pending_close: Arc<AtomicBool>,
+    click_through: bool,
 }
 
 unsafe impl Send for ViewportState {}
@@ -67,6 +74,49 @@ struct CanvasAttach {
     logical_h: u32,
     render_w: u32,
     render_h: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DesktopWindowOptions {
+    request_id: u32,
+    owner_app_id: Option<u32>,
+    target_canvas_id: u32,
+    mode: DesktopWindowMode,
+    flags: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+}
+
+impl Default for DesktopWindowOptions {
+    fn default() -> Self {
+        Self {
+            request_id: 0,
+            owner_app_id: None,
+            target_canvas_id: 0,
+            mode: DesktopWindowMode::Bordered,
+            flags: 0,
+            x: 100,
+            y: 100,
+            w: 720,
+            h: 420,
+        }
+    }
+}
+
+impl DesktopWindowOptions {
+    fn core_requested(self) -> bool {
+        self.request_id != 0 || self.owner_app_id.is_some() || self.target_canvas_id != 0
+    }
+
+    fn owner_app_id_wire(self) -> u32 {
+        self.owner_app_id.unwrap_or(0)
+    }
+
+    fn click_through(self) -> bool {
+        self.flags & DESKTOP_WINDOW_FLAG_CLICK_THROUGH != 0
+    }
 }
 
 struct WindowAttachment {
@@ -82,8 +132,9 @@ struct WindowAttachment {
 struct MonitorWindow {
     id: u32,
     hwnd: HWND,
+    options: DesktopWindowOptions,
     owner_app_id: Option<u32>,
-    target_canvas_id: u32,
+    core_monitor_id: Option<u32>,
     pending_close: Arc<AtomicBool>,
     in_frame: Arc<AtomicBool>,
     attachment: Option<WindowAttachment>,
@@ -104,7 +155,7 @@ enum PipeEvent {
 
 enum SingletonEvent {
     OpenWindow {
-        target_canvas_id: u32,
+        options: DesktopWindowOptions,
         reply: oneshot::Sender<SingletonResponse>,
     },
 }
@@ -149,6 +200,15 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
                 if ptr != 0 {
                     let state = &*(ptr as *const ViewportState);
                     update_viewport(hwnd, state);
+                }
+            }
+            WM_NCHITTEST => {
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+                if ptr != 0 {
+                    let state = &*(ptr as *const ViewportState);
+                    if state.click_through {
+                        return LRESULT(HTTRANSPARENT as isize);
+                    }
                 }
             }
             _ => {}
@@ -235,18 +295,31 @@ async fn connect_to_core() -> anyhow::Result<NamedPipeClient> {
 
 async fn register_and_wait_attach(
     hwnd: HWND,
-    target_canvas_id: u32,
+    options: DesktopWindowOptions,
 ) -> anyhow::Result<(NamedPipeClient, CanvasAttach)> {
     println!("[desktop-monitor] connecting to {}", PIPE_NAME);
     let mut pipe = connect_to_core().await?;
 
-    let msg = ControlMessage::RegisterMonitor {
-        pid: std::process::id(),
+    let msg = if options.core_requested() {
+        ControlMessage::RegisterMonitorV2 {
+            pid: std::process::id(),
+            kind: MonitorKind::DesktopWindow,
+            owner_app_id: options.owner_app_id_wire(),
+            request_id: options.request_id,
+            target_canvas_id: options.target_canvas_id,
+            mode: options.mode,
+            flags: options.flags,
+            manual_lifecycle: false,
+        }
+    } else {
+        ControlMessage::RegisterMonitor {
+            pid: std::process::id(),
+        }
     };
     let mut buf = BytesMut::new();
     msg.encode(&mut buf);
     pipe.write_all(&buf).await?;
-    println!("[desktop-monitor] sent RegisterMonitor");
+    println!("[desktop-monitor] sent {:?}", msg);
     println!("[desktop-monitor] waiting for CanvasAttached...");
 
     let attach = loop {
@@ -258,7 +331,7 @@ async fn register_and_wait_attach(
                 logical_h,
                 render_w,
                 render_h,
-            }) if target_canvas_id == 0 || canvas_id == target_canvas_id => {
+            }) if options.target_canvas_id == 0 || canvas_id == options.target_canvas_id => {
                 break CanvasAttach {
                     canvas_id,
                     surface_handle,
@@ -271,8 +344,11 @@ async fn register_and_wait_attach(
             Some(ControlMessage::CanvasAttached { canvas_id, .. }) => {
                 eprintln!(
                     "[desktop-monitor] skipping CanvasAttached canvas={} while waiting for target canvas={}",
-                    canvas_id, target_canvas_id
+                    canvas_id, options.target_canvas_id
                 );
+            }
+            Some(ControlMessage::CloseMonitor { monitor_id }) => {
+                anyhow::bail!("Core closed monitor {} before CanvasAttached", monitor_id);
             }
             Some(other) => {
                 eprintln!(
@@ -308,6 +384,7 @@ fn build_attachment(
     hwnd: HWND,
     attach: CanvasAttach,
     pending_close: Arc<AtomicBool>,
+    click_through: bool,
 ) -> anyhow::Result<WindowAttachment> {
     let dup_handle = HANDLE(attach.surface_handle as *mut _);
     let mut d3d_opt = None;
@@ -361,6 +438,7 @@ fn build_attachment(
         render_w: attach.render_w,
         render_h: attach.render_h,
         pending_close,
+        click_through,
     };
     install_viewport_state(hwnd, state);
 
@@ -421,9 +499,8 @@ async fn reconnect_with_backoff(
         );
         tokio::time::sleep(delay).await;
 
-        match create_monitor_hwnd() {
-            Ok(new_hwnd) => match register_and_wait_attach(new_hwnd, window.target_canvas_id).await
-            {
+        match create_monitor_hwnd(window.options) {
+            Ok(new_hwnd) => match register_and_wait_attach(new_hwnd, window.options).await {
                 Ok((new_pipe, attach)) => {
                     let old_hwnd = window.hwnd;
                     window.hwnd = new_hwnd;
@@ -432,6 +509,7 @@ async fn reconnect_with_backoff(
                         new_hwnd,
                         attach,
                         window.pending_close.clone(),
+                        window.options.click_through(),
                     )?);
                     spawn_pipe_reader(window.id, new_pipe, pipe_events);
 
@@ -463,19 +541,77 @@ async fn reconnect_with_backoff(
     anyhow::bail!("reconnect failed after {RECONNECT_MAX_ATTEMPTS} attempts")
 }
 
-fn create_monitor_hwnd() -> anyhow::Result<HWND> {
+fn window_dimension(value: u32, fallback: i32) -> i32 {
+    if value == 0 {
+        fallback
+    } else {
+        i32::try_from(value).unwrap_or(i32::MAX).max(1)
+    }
+}
+
+fn fullscreen_rect_for_options(options: DesktopWindowOptions) -> (i32, i32, i32, i32) {
+    let w = window_dimension(options.w, 720);
+    let h = window_dimension(options.h, 420);
+    let rect = RECT {
+        left: options.x,
+        top: options.y,
+        right: options.x.saturating_add(w),
+        bottom: options.y.saturating_add(h),
+    };
+    let monitor = unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
+        let width = info
+            .rcMonitor
+            .right
+            .saturating_sub(info.rcMonitor.left)
+            .max(1);
+        let height = info
+            .rcMonitor
+            .bottom
+            .saturating_sub(info.rcMonitor.top)
+            .max(1);
+        (info.rcMonitor.left, info.rcMonitor.top, width, height)
+    } else {
+        (options.x, options.y, w, h)
+    }
+}
+
+fn create_monitor_hwnd(options: DesktopWindowOptions) -> anyhow::Result<HWND> {
     let hinst = unsafe { GetModuleHandleW(None)? };
     let class_name = w!("OverlayDesktopMonitor");
+    let ex_style = if options.click_through() {
+        WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT
+    } else {
+        WS_EX_NOREDIRECTIONBITMAP
+    };
+    let style = match options.mode {
+        DesktopWindowMode::Bordered => WS_OVERLAPPEDWINDOW,
+        DesktopWindowMode::Borderless | DesktopWindowMode::BorderlessFullscreen => WS_POPUP,
+    };
+    let (x, y, w, h) = if options.mode == DesktopWindowMode::BorderlessFullscreen {
+        fullscreen_rect_for_options(options)
+    } else {
+        (
+            options.x,
+            options.y,
+            window_dimension(options.w, 720),
+            window_dimension(options.h, 420),
+        )
+    };
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_NOREDIRECTIONBITMAP,
+            ex_style,
             class_name,
             w!("Desktop Monitor - connecting..."),
-            WS_OVERLAPPEDWINDOW,
-            100,
-            100,
-            720,
-            420,
+            style,
+            x,
+            y,
+            w,
+            h,
             None,
             None,
             Some(HINSTANCE(hinst.0)),
@@ -503,14 +639,15 @@ fn register_window_class() -> anyhow::Result<()> {
 
 async fn open_monitor_window(
     id: u32,
-    target_canvas_id: u32,
+    options: DesktopWindowOptions,
     pipe_events: mpsc::Sender<PipeEvent>,
 ) -> anyhow::Result<MonitorWindow> {
-    let hwnd = create_monitor_hwnd()?;
+    let hwnd = create_monitor_hwnd(options)?;
     let pending_close = Arc::new(AtomicBool::new(false));
     let in_frame = Arc::new(AtomicBool::new(false));
-    let (pipe, attach) = register_and_wait_attach(hwnd, target_canvas_id).await?;
-    let attachment = build_attachment(hwnd, attach, pending_close.clone())?;
+    let (pipe, attach) = register_and_wait_attach(hwnd, options).await?;
+    let attachment =
+        build_attachment(hwnd, attach, pending_close.clone(), options.click_through())?;
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
     }
@@ -518,8 +655,9 @@ async fn open_monitor_window(
     Ok(MonitorWindow {
         id,
         hwnd,
-        owner_app_id: None,
-        target_canvas_id,
+        options,
+        owner_app_id: options.owner_app_id,
+        core_monitor_id: None,
         pending_close,
         in_frame,
         attachment: Some(attachment),
@@ -616,16 +754,66 @@ where
     writer.write_all(&buf).await
 }
 
+fn options_from_singleton_request(request: SingletonRequest) -> DesktopWindowOptions {
+    match request {
+        SingletonRequest::OpenWindow { target_canvas_id } => DesktopWindowOptions {
+            target_canvas_id,
+            ..Default::default()
+        },
+        SingletonRequest::OpenWindowV2 {
+            request_id,
+            owner_app_id,
+            target_canvas_id,
+            mode,
+            flags,
+            x,
+            y,
+            w,
+            h,
+        } => DesktopWindowOptions {
+            request_id,
+            owner_app_id: (owner_app_id != 0).then_some(owner_app_id),
+            target_canvas_id,
+            mode,
+            flags,
+            x,
+            y,
+            w,
+            h,
+        },
+    }
+}
+
+fn singleton_request_from_options(options: DesktopWindowOptions) -> SingletonRequest {
+    if options.core_requested() {
+        SingletonRequest::OpenWindowV2 {
+            request_id: options.request_id,
+            owner_app_id: options.owner_app_id_wire(),
+            target_canvas_id: options.target_canvas_id,
+            mode: options.mode,
+            flags: options.flags,
+            x: options.x,
+            y: options.y,
+            w: options.w,
+            h: options.h,
+        }
+    } else {
+        SingletonRequest::OpenWindow {
+            target_canvas_id: options.target_canvas_id,
+        }
+    }
+}
+
 async fn handle_singleton_connection(
     mut server: NamedPipeServer,
     tx: mpsc::Sender<SingletonEvent>,
 ) {
     match read_singleton_request(&mut server).await {
-        Ok(SingletonRequest::OpenWindow { target_canvas_id }) => {
+        Ok(request) => {
             let (reply_tx, reply_rx) = oneshot::channel();
             if tx
                 .send(SingletonEvent::OpenWindow {
-                    target_canvas_id,
+                    options: options_from_singleton_request(request),
                     reply: reply_tx,
                 })
                 .await
@@ -710,16 +898,10 @@ async fn connect_singleton_client() -> std::io::Result<NamedPipeClient> {
     }
 }
 
-async fn run_as_launcher() -> anyhow::Result<()> {
+async fn run_as_launcher(options: DesktopWindowOptions) -> anyhow::Result<()> {
     let mut client =
         tokio::time::timeout(LAUNCHER_CONNECT_TIMEOUT, connect_singleton_client()).await??;
-    write_singleton_request(
-        &mut client,
-        SingletonRequest::OpenWindow {
-            target_canvas_id: 0,
-        },
-    )
-    .await?;
+    write_singleton_request(&mut client, singleton_request_from_options(options)).await?;
     match tokio::time::timeout(LAUNCHER_ACK_TIMEOUT, read_singleton_response(&mut client)).await {
         Ok(Ok(SingletonResponse::Ack { pid, .. })) => {
             println!("{}", launcher_log_line(pid));
@@ -737,17 +919,18 @@ async fn run_as_launcher() -> anyhow::Result<()> {
     }
 }
 
-async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Result<()> {
+async fn run_as_monitor_process(
+    singleton_server: NamedPipeServer,
+    initial_options: DesktopWindowOptions,
+) -> anyhow::Result<()> {
     let (pipe_tx, mut pipe_rx) = mpsc::channel::<PipeEvent>(64);
     let (singleton_tx, mut singleton_rx) = mpsc::channel::<SingletonEvent>(8);
     spawn_singleton_accept_loop(singleton_server, singleton_tx);
 
     let mut next_window_id = 1u32;
-    let mut windows = Vec::new();
-    for _ in 0..2 {
-        windows.push(open_monitor_window(next_window_id, 0, pipe_tx.clone()).await?);
-        next_window_id += 1;
-    }
+    let mut windows =
+        vec![open_monitor_window(next_window_id, initial_options, pipe_tx.clone()).await?];
+    next_window_id = next_window_id.saturating_add(1);
     println!(
         "[desktop-monitor] {} windows attached, running render loop",
         windows.len()
@@ -764,10 +947,10 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
         tokio::select! {
             Some(event) = singleton_rx.recv() => {
                 match event {
-                    SingletonEvent::OpenWindow { target_canvas_id, reply } => {
+                    SingletonEvent::OpenWindow { options, reply } => {
                         let window_id = next_window_id;
                         next_window_id = next_window_id.saturating_add(1);
-                        let response = match open_monitor_window(window_id, target_canvas_id, pipe_tx.clone()).await {
+                        let response = match open_monitor_window(window_id, options, pipe_tx.clone()).await {
                             Ok(window) => {
                                 windows.push(window);
                                 SingletonResponse::Ack {
@@ -795,26 +978,32 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                             }
                         }
                     }
+                    PipeEvent::Message { window_id, msg: ControlMessage::CloseMonitor { monitor_id } } => {
+                        println!("[desktop-monitor] CloseMonitor monitor={} window={}", monitor_id, window_id);
+                        if let Some(w) = windows.iter().find(|w| w.id == window_id) {
+                            if w.core_monitor_id.is_none() || w.core_monitor_id == Some(monitor_id) {
+                                w.pending_close.store(true, Ordering::SeqCst);
+                            }
+                        }
+                    }
                     PipeEvent::Message { window_id, msg: ControlMessage::CanvasAttached {
                         canvas_id, surface_handle, logical_w, logical_h, render_w, render_h,
                     } } => {
                         println!("[desktop-monitor] CanvasAttached on window {}: canvas={}", window_id, canvas_id);
-                        let target_canvas_id = windows
+                        let options = windows
                             .iter()
                             .find(|w| w.id == window_id)
-                            .map(|w| w.target_canvas_id)
-                            .unwrap_or(canvas_id);
+                            .map(|w| w.options)
+                            .unwrap_or_else(|| DesktopWindowOptions {
+                                target_canvas_id: canvas_id,
+                                ..Default::default()
+                            });
 
-                        // Check if the window exists and is NOT pending closure.
                         if let Some(window) = windows.iter_mut().find(|w| w.id == window_id && !w.pending_close.load(Ordering::SeqCst)) {
-                            // Re-using the same HWND with DComp is tricky because CreateTargetForHwnd
-                            // fails with DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED. We should destroy
-                            // the old HWND and create a new one instead of trying to reuse it.
                             window.pending_close.store(true, Ordering::SeqCst);
                         }
 
-                        // Always create a fresh window to avoid DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED
-                        match create_monitor_hwnd() {
+                        match create_monitor_hwnd(options) {
                             Ok(hwnd) => {
                                 let pending_close = Arc::new(AtomicBool::new(false));
                                 let in_frame = Arc::new(AtomicBool::new(false));
@@ -826,14 +1015,15 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                                     render_w,
                                     render_h,
                                 };
-                                match build_attachment(hwnd, attach, pending_close.clone()) {
+                                match build_attachment(hwnd, attach, pending_close.clone(), options.click_through()) {
                                     Ok(a) => {
                                         unsafe { let _ = ShowWindow(hwnd, SW_SHOW); }
                                         windows.push(MonitorWindow {
                                             id: window_id,
                                             hwnd,
-                                            owner_app_id: None,
-                                            target_canvas_id,
+                                            options,
+                                            owner_app_id: options.owner_app_id,
+                                            core_monitor_id: None,
                                             pending_close,
                                             in_frame,
                                             attachment: Some(a),
@@ -851,14 +1041,14 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                         }
                     }
                     PipeEvent::Message { window_id, msg: ControlMessage::MonitorLocalSurfaceAttached {
-                        canvas_id, surface_handle, ..
+                        canvas_id, monitor_id, surface_handle, ..
                     } } => {
                         println!(
-                            "[desktop-monitor] MonitorLocalSurfaceAttached on window {}: canvas={} handle={:#x}",
-                            window_id, canvas_id, surface_handle
+                            "[desktop-monitor] MonitorLocalSurfaceAttached on window {}: canvas={} monitor={} handle={:#x}",
+                            window_id, canvas_id, monitor_id, surface_handle
                         );
-                        // Make sure we only find the ACTIVE window (ignore those marked pending_close from re-creation).
                         if let Some(window) = windows.iter_mut().find(|w| w.id == window_id && !w.pending_close.load(Ordering::SeqCst)) {
+                            window.core_monitor_id = Some(monitor_id);
                             if let Some(ref mut att) = window.attachment {
                                 if att._canvas_id == canvas_id {
                                     match hot_attach_ml(att, surface_handle) {
@@ -906,6 +1096,9 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                 windows.retain(|w| {
                     !(w.pending_close.load(Ordering::SeqCst) && !w.in_frame.load(Ordering::SeqCst))
                 });
+                if windows.is_empty() {
+                    break;
+                }
             }
         }
     }
@@ -913,15 +1106,119 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
     Ok(())
 }
 
+fn parse_mode(value: &str) -> anyhow::Result<DesktopWindowMode> {
+    match value {
+        "bordered" => Ok(DesktopWindowMode::Bordered),
+        "borderless" => Ok(DesktopWindowMode::Borderless),
+        "borderless-fullscreen" | "fullscreen" => Ok(DesktopWindowMode::BorderlessFullscreen),
+        _ => anyhow::bail!("unknown desktop window mode: {value}"),
+    }
+}
+
+fn parse_bool_flag(value: &str) -> anyhow::Result<bool> {
+    match value {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("invalid boolean flag value: {value}"),
+    }
+}
+
+fn parse_initial_options() -> anyhow::Result<DesktopWindowOptions> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut options = DesktopWindowOptions::default();
+    let mut i = 1usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--request-id" => {
+                i += 1;
+                options.request_id = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("--request-id needs a value"))?
+                    .parse()?;
+            }
+            "--owner-app-id" => {
+                i += 1;
+                let owner_app_id: u32 = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("--owner-app-id needs a value"))?
+                    .parse()?;
+                options.owner_app_id = (owner_app_id != 0).then_some(owner_app_id);
+            }
+            "--target-canvas-id" => {
+                i += 1;
+                options.target_canvas_id = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("--target-canvas-id needs a value"))?
+                    .parse()?;
+            }
+            "--mode" => {
+                i += 1;
+                options.mode = parse_mode(
+                    args.get(i)
+                        .ok_or_else(|| anyhow::anyhow!("--mode needs a value"))?,
+                )?;
+            }
+            "--click-through" => {
+                let enabled = if args
+                    .get(i + 1)
+                    .is_some_and(|value| !value.starts_with("--"))
+                {
+                    i += 1;
+                    parse_bool_flag(&args[i])?
+                } else {
+                    true
+                };
+                if enabled {
+                    options.flags |= DESKTOP_WINDOW_FLAG_CLICK_THROUGH;
+                } else {
+                    options.flags &= !DESKTOP_WINDOW_FLAG_CLICK_THROUGH;
+                }
+            }
+            "--x" => {
+                i += 1;
+                options.x = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("--x needs a value"))?
+                    .parse()?;
+            }
+            "--y" => {
+                i += 1;
+                options.y = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("--y needs a value"))?
+                    .parse()?;
+            }
+            "--w" => {
+                i += 1;
+                options.w = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("--w needs a value"))?
+                    .parse()?;
+            }
+            "--h" => {
+                i += 1;
+                options.h = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("--h needs a value"))?
+                    .parse()?;
+            }
+            other => eprintln!("[desktop-monitor] ignoring unknown arg: {other}"),
+        }
+        i += 1;
+    }
+    Ok(options)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let options = parse_initial_options()?;
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     match create_singleton_server(true) {
         Ok(server) => {
             register_window_class()?;
-            run_as_monitor_process(server).await
+            run_as_monitor_process(server, options).await
         }
-        Err(e) if e.kind() == ErrorKind::PermissionDenied => run_as_launcher().await,
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => run_as_launcher(options).await,
         Err(e) => Err(e.into()),
     }
 }
