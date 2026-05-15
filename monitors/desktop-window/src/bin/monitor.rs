@@ -15,27 +15,29 @@ use tokio::net::windows::named_pipe::{
 use tokio::sync::{mpsc, oneshot};
 use windows::core::{w, IUnknown, Interface, PCWSTR};
 use windows::Foundation::Numerics::Matrix3x2;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice2, DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR,
-    IDCompositionDesktopDevice, IDCompositionTarget, IDCompositionVisual, IDCompositionVisual2,
+    DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionTarget,
+    IDCompositionVisual, IDCompositionVisual2, DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetWindowLongPtrW, LoadCursorW, PeekMessageW, RegisterClassExW, SetWindowLongPtrW,
     SetWindowTextW, ShowWindow, TranslateMessage, GWLP_USERDATA, IDC_ARROW, MSG, PM_REMOVE,
-    SW_SHOW, WM_CLOSE, WM_DESTROY, WM_QUIT, WM_WINDOWPOSCHANGED, WNDCLASSEXW,
-    WNDCLASS_STYLES, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    SW_SHOW, WM_CLOSE, WM_DESTROY, WM_QUIT, WM_WINDOWPOSCHANGED, WNDCLASSEXW, WNDCLASS_STYLES,
+    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\overlay-core";
@@ -65,11 +67,6 @@ struct CanvasAttach {
     logical_h: u32,
     render_w: u32,
     render_h: u32,
-    ml_info: Option<MonitorLocalAttach>,
-}
-
-struct MonitorLocalAttach {
-    surface_handle: u64,
 }
 
 struct WindowAttachment {
@@ -86,6 +83,7 @@ struct MonitorWindow {
     id: u32,
     hwnd: HWND,
     owner_app_id: Option<u32>,
+    target_canvas_id: u32,
     pending_close: Arc<AtomicBool>,
     in_frame: Arc<AtomicBool>,
     attachment: Option<WindowAttachment>,
@@ -106,7 +104,7 @@ enum PipeEvent {
 
 enum SingletonEvent {
     OpenWindow {
-        _target_canvas_id: u32,
+        target_canvas_id: u32,
         reply: oneshot::Sender<SingletonResponse>,
     },
 }
@@ -197,7 +195,9 @@ fn install_viewport_state(hwnd: HWND, state: ViewportState) {
     }
 }
 
-async fn read_next_control_message(pipe: &mut NamedPipeClient) -> anyhow::Result<Option<ControlMessage>> {
+async fn read_next_control_message(
+    pipe: &mut NamedPipeClient,
+) -> anyhow::Result<Option<ControlMessage>> {
     let mut header_buf = [0u8; HEADER_SIZE];
     pipe.read_exact(&mut header_buf).await?;
 
@@ -211,14 +211,21 @@ async fn read_next_control_message(pipe: &mut NamedPipeClient) -> anyhow::Result
         buf.extend_from_slice(&payload_buf);
     }
 
-    Ok(ControlMessage::decode(header.opcode, header.payload_len, &mut buf)?)
+    Ok(ControlMessage::decode(
+        header.opcode,
+        header.payload_len,
+        &mut buf,
+    )?)
 }
 
 async fn connect_to_core() -> anyhow::Result<NamedPipeClient> {
     loop {
         match ClientOptions::new().open(PIPE_NAME) {
             Ok(c) => return Ok(c),
-            Err(e) if e.raw_os_error() == Some(windows::Win32::Foundation::ERROR_PIPE_BUSY.0 as i32) => {
+            Err(e)
+                if e.raw_os_error()
+                    == Some(windows::Win32::Foundation::ERROR_PIPE_BUSY.0 as i32) =>
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             Err(e) => return Err(e.into()),
@@ -226,11 +233,16 @@ async fn connect_to_core() -> anyhow::Result<NamedPipeClient> {
     }
 }
 
-async fn register_and_wait_attach(hwnd: HWND) -> anyhow::Result<(NamedPipeClient, CanvasAttach)> {
+async fn register_and_wait_attach(
+    hwnd: HWND,
+    target_canvas_id: u32,
+) -> anyhow::Result<(NamedPipeClient, CanvasAttach)> {
     println!("[desktop-monitor] connecting to {}", PIPE_NAME);
     let mut pipe = connect_to_core().await?;
 
-    let msg = ControlMessage::RegisterMonitor { pid: std::process::id() };
+    let msg = ControlMessage::RegisterMonitor {
+        pid: std::process::id(),
+    };
     let mut buf = BytesMut::new();
     msg.encode(&mut buf);
     pipe.write_all(&buf).await?;
@@ -246,7 +258,7 @@ async fn register_and_wait_attach(hwnd: HWND) -> anyhow::Result<(NamedPipeClient
                 logical_h,
                 render_w,
                 render_h,
-            }) => {
+            }) if target_canvas_id == 0 || canvas_id == target_canvas_id => {
                 break CanvasAttach {
                     canvas_id,
                     surface_handle,
@@ -254,11 +266,19 @@ async fn register_and_wait_attach(hwnd: HWND) -> anyhow::Result<(NamedPipeClient
                     logical_h,
                     render_w,
                     render_h,
-                    ml_info: None,
                 };
             }
+            Some(ControlMessage::CanvasAttached { canvas_id, .. }) => {
+                eprintln!(
+                    "[desktop-monitor] skipping CanvasAttached canvas={} while waiting for target canvas={}",
+                    canvas_id, target_canvas_id
+                );
+            }
             Some(other) => {
-                eprintln!("[desktop-monitor] unexpected message before CanvasAttached: {:?}", other);
+                eprintln!(
+                    "[desktop-monitor] unexpected message before CanvasAttached: {:?}",
+                    other
+                );
             }
             None => {}
         }
@@ -273,53 +293,13 @@ async fn register_and_wait_attach(hwnd: HWND) -> anyhow::Result<(NamedPipeClient
         attach.render_w,
         attach.render_h
     );
-    set_window_title(hwnd, AttachState::Attached { canvas_id: attach.canvas_id, ml: false });
-
-    let timeout = tokio::time::sleep(std::time::Duration::from_millis(200));
-    tokio::pin!(timeout);
-    let mut attach = attach;
-
-    tokio::select! {
-        biased;
-        read_result = read_next_control_message(&mut pipe) => {
-            match read_result {
-                Ok(Some(ControlMessage::MonitorLocalSurfaceAttached {
-                    canvas_id: ml_canvas_id,
-                    surface_handle,
-                    logical_w,
-                    logical_h,
-                    ..
-                })) if ml_canvas_id == attach.canvas_id => {
-                    println!(
-                        "[desktop-monitor] MonitorLocalSurfaceAttached: handle={:#x} log={}x{}",
-                        surface_handle,
-                        logical_w,
-                        logical_h
-                    );
-                    attach.ml_info = Some(MonitorLocalAttach { surface_handle });
-                }
-                Ok(Some(other)) => {
-                    eprintln!("[desktop-monitor] unexpected message after CanvasAttached: {:?}", other);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    eprintln!(
-                        "[desktop-monitor] pipe read after CanvasAttached failed: {e}; \
-                         proceeding with World-only attach"
-                    );
-                    set_window_title(hwnd, AttachState::Reconnecting);
-                }
-            }
-        }
-        _ = &mut timeout => {}
-    }
-
-    if attach.ml_info.is_none() {
-        println!(
-            "[desktop-monitor] no MonitorLocalSurfaceAttached within window; \
-             using World-only attach path"
-        );
-    }
+    set_window_title(
+        hwnd,
+        AttachState::Attached {
+            canvas_id: attach.canvas_id,
+            ml: false,
+        },
+    );
 
     Ok((pipe, attach))
 }
@@ -329,7 +309,7 @@ fn build_attachment(
     attach: CanvasAttach,
     pending_close: Arc<AtomicBool>,
 ) -> anyhow::Result<WindowAttachment> {
-    let dup_handle = windows::Win32::Foundation::HANDLE(attach.surface_handle as *mut _);
+    let dup_handle = HANDLE(attach.surface_handle as *mut _);
     let mut d3d_opt = None;
     unsafe {
         D3D11CreateDevice(
@@ -347,7 +327,11 @@ fn build_attachment(
     let d3d = d3d_opt.unwrap();
     let dxgi: IDXGIDevice = d3d.cast()?;
     let dcomp_dev: IDCompositionDesktopDevice = unsafe { DCompositionCreateDevice2(&dxgi)? };
-    let surface_wrapper: IUnknown = unsafe { dcomp_dev.CreateSurfaceFromHandle(dup_handle)? };
+    let surface_wrapper_result = unsafe { dcomp_dev.CreateSurfaceFromHandle(dup_handle) };
+    unsafe {
+        let _ = CloseHandle(dup_handle);
+    }
+    let surface_wrapper: IUnknown = surface_wrapper_result?;
 
     let visual = unsafe { dcomp_dev.CreateVisual()? };
     unsafe {
@@ -362,26 +346,11 @@ fn build_attachment(
         target.SetRoot(&root)?;
     }
 
-    let ml_visual_state = if let Some(ml) = attach.ml_info {
-        let ml_dup_handle = windows::Win32::Foundation::HANDLE(ml.surface_handle as *mut _);
-        let ml_surface: IUnknown = unsafe { dcomp_dev.CreateSurfaceFromHandle(ml_dup_handle)? };
-        let ml_visual = unsafe { dcomp_dev.CreateVisual()? };
-        unsafe {
-            ml_visual.SetContent(&ml_surface)?;
-            ml_visual.SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR)?;
-            root.AddVisual(&ml_visual, true, &visual)?;
-            dcomp_dev.Commit()?;
-        }
-        println!("[desktop-monitor] mounted dual visual tree (World + MonitorLocal)");
-        set_window_title(hwnd, AttachState::Attached { canvas_id: attach.canvas_id, ml: true });
-        Some((ml_visual, ml_surface))
-    } else {
-        unsafe {
-            dcomp_dev.Commit()?;
-        }
-        println!("[desktop-monitor] mounted single visual tree (World only)");
-        None
-    };
+    unsafe {
+        dcomp_dev.Commit()?;
+    }
+    println!("[desktop-monitor] mounted single visual tree (World only)");
+    let ml_visual_state = None;
 
     let state = ViewportState {
         visual: visual.clone(),
@@ -413,13 +382,18 @@ fn build_attachment(
 }
 
 fn hot_attach_ml(att: &mut WindowAttachment, surface_handle: u64) -> anyhow::Result<()> {
-    let ml_handle = windows::Win32::Foundation::HANDLE(surface_handle as *mut _);
-    let ml_surface: IUnknown = unsafe { att._dcomp_dev.CreateSurfaceFromHandle(ml_handle)? };
+    let ml_handle = HANDLE(surface_handle as *mut _);
+    let ml_surface_result = unsafe { att._dcomp_dev.CreateSurfaceFromHandle(ml_handle) };
+    unsafe {
+        let _ = CloseHandle(ml_handle);
+    }
+    let ml_surface: IUnknown = ml_surface_result?;
     let ml_visual = unsafe { att._dcomp_dev.CreateVisual()? };
     unsafe {
         ml_visual.SetContent(&ml_surface)?;
         ml_visual.SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR)?;
-        att._root_visual.AddVisual(&ml_visual, true, &att._world_visual)?;
+        att._root_visual
+            .AddVisual(&ml_visual, true, &att._world_visual)?;
         att._dcomp_dev.Commit()?;
     }
     att._ml_visual_state = Some((ml_visual, ml_surface));
@@ -448,12 +422,17 @@ async fn reconnect_with_backoff(
         tokio::time::sleep(delay).await;
 
         match create_monitor_hwnd() {
-            Ok(new_hwnd) => match register_and_wait_attach(new_hwnd).await {
+            Ok(new_hwnd) => match register_and_wait_attach(new_hwnd, window.target_canvas_id).await
+            {
                 Ok((new_pipe, attach)) => {
                     let old_hwnd = window.hwnd;
                     window.hwnd = new_hwnd;
 
-                    window.attachment = Some(build_attachment(new_hwnd, attach, window.pending_close.clone())?);
+                    window.attachment = Some(build_attachment(
+                        new_hwnd,
+                        attach,
+                        window.pending_close.clone(),
+                    )?);
                     spawn_pipe_reader(window.id, new_pipe, pipe_events);
 
                     unsafe {
@@ -463,12 +442,20 @@ async fn reconnect_with_backoff(
                     return Ok(());
                 }
                 Err(e) => {
-                    unsafe { let _ = DestroyWindow(new_hwnd); }
-                    eprintln!("[desktop-monitor] reconnect attempt {} failed: {e}", attempt + 1);
+                    unsafe {
+                        let _ = DestroyWindow(new_hwnd);
+                    }
+                    eprintln!(
+                        "[desktop-monitor] reconnect attempt {} failed: {e}",
+                        attempt + 1
+                    );
                 }
             },
             Err(e) => {
-                eprintln!("[desktop-monitor] reconnect attempt {} failed to create window: {e}", attempt + 1);
+                eprintln!(
+                    "[desktop-monitor] reconnect attempt {} failed to create window: {e}",
+                    attempt + 1
+                );
             }
         }
     }
@@ -516,12 +503,13 @@ fn register_window_class() -> anyhow::Result<()> {
 
 async fn open_monitor_window(
     id: u32,
+    target_canvas_id: u32,
     pipe_events: mpsc::Sender<PipeEvent>,
 ) -> anyhow::Result<MonitorWindow> {
     let hwnd = create_monitor_hwnd()?;
     let pending_close = Arc::new(AtomicBool::new(false));
     let in_frame = Arc::new(AtomicBool::new(false));
-    let (pipe, attach) = register_and_wait_attach(hwnd).await?;
+    let (pipe, attach) = register_and_wait_attach(hwnd, target_canvas_id).await?;
     let attachment = build_attachment(hwnd, attach, pending_close.clone())?;
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
@@ -531,6 +519,7 @@ async fn open_monitor_window(
         id,
         hwnd,
         owner_app_id: None,
+        target_canvas_id,
         pending_close,
         in_frame,
         attachment: Some(attachment),
@@ -542,7 +531,11 @@ fn spawn_pipe_reader(id: u32, mut pipe: NamedPipeClient, tx: mpsc::Sender<PipeEv
         loop {
             match read_next_control_message(&mut pipe).await {
                 Ok(Some(msg)) => {
-                    if tx.send(PipeEvent::Message { window_id: id, msg }).await.is_err() {
+                    if tx
+                        .send(PipeEvent::Message { window_id: id, msg })
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -599,7 +592,10 @@ where
     decode_response(&mut buf).map_err(|e| IoError::new(ErrorKind::InvalidData, format!("{e:?}")))
 }
 
-async fn write_singleton_response<W>(writer: &mut W, response: &SingletonResponse) -> std::io::Result<()>
+async fn write_singleton_response<W>(
+    writer: &mut W,
+    response: &SingletonResponse,
+) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -608,13 +604,54 @@ where
     writer.write_all(&buf).await
 }
 
-async fn write_singleton_request<W>(writer: &mut W, request: SingletonRequest) -> std::io::Result<()>
+async fn write_singleton_request<W>(
+    writer: &mut W,
+    request: SingletonRequest,
+) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
     let mut buf = BytesMut::new();
     encode_request(request, &mut buf);
     writer.write_all(&buf).await
+}
+
+async fn handle_singleton_connection(
+    mut server: NamedPipeServer,
+    tx: mpsc::Sender<SingletonEvent>,
+) {
+    match read_singleton_request(&mut server).await {
+        Ok(SingletonRequest::OpenWindow { target_canvas_id }) => {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if tx
+                .send(SingletonEvent::OpenWindow {
+                    target_canvas_id,
+                    reply: reply_tx,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            match reply_rx.await {
+                Ok(response) => {
+                    if let Err(e) = write_singleton_response(&mut server, &response).await {
+                        eprintln!("[desktop-monitor] singleton response write failed: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[desktop-monitor] singleton response canceled: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            let response = SingletonResponse::Nack {
+                reason: 1,
+                message: format!("malformed singleton request: {e}"),
+            };
+            let _ = write_singleton_response(&mut server, &response).await;
+        }
+    }
 }
 
 fn spawn_singleton_accept_loop(mut server: NamedPipeServer, tx: mpsc::Sender<SingletonEvent>) {
@@ -625,58 +662,44 @@ fn spawn_singleton_accept_loop(mut server: NamedPipeServer, tx: mpsc::Sender<Sin
                 break;
             }
 
-            let request = read_singleton_request(&mut server).await;
-            let next_server = match create_singleton_server(false) {
+            let connected_server = server;
+            server = match create_singleton_server(false) {
                 Ok(next) => next,
                 Err(e) => {
                     eprintln!("[desktop-monitor] singleton next instance create failed: {e}");
+                    tokio::spawn(handle_singleton_connection(connected_server, tx.clone()));
                     break;
                 }
             };
 
-            match request {
-                Ok(SingletonRequest::OpenWindow { target_canvas_id }) => {
-                    let (reply_tx, reply_rx) = oneshot::channel();
-                    if tx
-                        .send(SingletonEvent::OpenWindow {
-                            _target_canvas_id: target_canvas_id,
-                            reply: reply_tx,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                    match reply_rx.await {
-                        Ok(response) => {
-                            if let Err(e) = write_singleton_response(&mut server, &response).await {
-                                eprintln!("[desktop-monitor] singleton response write failed: {e}");
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[desktop-monitor] singleton response canceled: {e}");
-                        }
-                    }
-                }
-                Err(e) => {
-                    let response = SingletonResponse::Nack {
-                        reason: 1,
-                        message: format!("malformed singleton request: {e}"),
-                    };
-                    let _ = write_singleton_response(&mut server, &response).await;
-                }
-            }
-
-            server = next_server;
+            tokio::spawn(handle_singleton_connection(connected_server, tx.clone()));
         }
     });
+}
+
+fn pump_win32_messages() -> bool {
+    let mut quit = false;
+    let mut msg = MSG::default();
+    while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+        if msg.message == WM_QUIT {
+            quit = true;
+        }
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    quit
 }
 
 async fn connect_singleton_client() -> std::io::Result<NamedPipeClient> {
     loop {
         match ClientOptions::new().open(SINGLETON_PIPE_NAME) {
             Ok(c) => return Ok(c),
-            Err(e) if e.raw_os_error() == Some(windows::Win32::Foundation::ERROR_PIPE_BUSY.0 as i32) => {
+            Err(e)
+                if e.raw_os_error()
+                    == Some(windows::Win32::Foundation::ERROR_PIPE_BUSY.0 as i32) =>
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {
@@ -688,8 +711,15 @@ async fn connect_singleton_client() -> std::io::Result<NamedPipeClient> {
 }
 
 async fn run_as_launcher() -> anyhow::Result<()> {
-    let mut client = tokio::time::timeout(LAUNCHER_CONNECT_TIMEOUT, connect_singleton_client()).await??;
-    write_singleton_request(&mut client, SingletonRequest::OpenWindow { target_canvas_id: 0 }).await?;
+    let mut client =
+        tokio::time::timeout(LAUNCHER_CONNECT_TIMEOUT, connect_singleton_client()).await??;
+    write_singleton_request(
+        &mut client,
+        SingletonRequest::OpenWindow {
+            target_canvas_id: 0,
+        },
+    )
+    .await?;
     match tokio::time::timeout(LAUNCHER_ACK_TIMEOUT, read_singleton_response(&mut client)).await {
         Ok(Ok(SingletonResponse::Ack { pid, .. })) => {
             println!("{}", launcher_log_line(pid));
@@ -700,7 +730,9 @@ async fn run_as_launcher() -> anyhow::Result<()> {
         }
         Ok(Err(e)) => Err(e.into()),
         Err(_) => {
-            anyhow::bail!("singleton ack timeout; assuming existing monitor-process is stuck, exiting")
+            anyhow::bail!(
+                "singleton ack timeout; assuming existing monitor-process is stuck, exiting"
+            )
         }
     }
 }
@@ -713,22 +745,29 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
     let mut next_window_id = 1u32;
     let mut windows = Vec::new();
     for _ in 0..2 {
-        windows.push(open_monitor_window(next_window_id, pipe_tx.clone()).await?);
+        windows.push(open_monitor_window(next_window_id, 0, pipe_tx.clone()).await?);
         next_window_id += 1;
     }
-    println!("[desktop-monitor] {} windows attached, running render loop", windows.len());
+    println!(
+        "[desktop-monitor] {} windows attached, running render loop",
+        windows.len()
+    );
 
     let frame_interval = std::time::Duration::from_micros(8000);
     let mut next_tick = tokio::time::Instant::now() + frame_interval;
 
     loop {
+        if pump_win32_messages() {
+            break;
+        }
+
         tokio::select! {
             Some(event) = singleton_rx.recv() => {
                 match event {
-                    SingletonEvent::OpenWindow { _target_canvas_id: _, reply } => {
+                    SingletonEvent::OpenWindow { target_canvas_id, reply } => {
                         let window_id = next_window_id;
                         next_window_id = next_window_id.saturating_add(1);
-                        let response = match open_monitor_window(window_id, pipe_tx.clone()).await {
+                        let response = match open_monitor_window(window_id, target_canvas_id, pipe_tx.clone()).await {
                             Ok(window) => {
                                 windows.push(window);
                                 SingletonResponse::Ack {
@@ -748,9 +787,9 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
 
             Some(event) = pipe_rx.recv() => {
                 match event {
-                    PipeEvent::Message { window_id: _, msg: ControlMessage::AppDetached { app_id, reason } } => {
-                        println!("[desktop-monitor] AppDetached app={} reason={}", app_id, reason);
-                        for w in &windows {
+                    PipeEvent::Message { window_id, msg: ControlMessage::AppDetached { app_id, reason } } => {
+                        println!("[desktop-monitor] AppDetached app={} reason={} window={}", app_id, reason, window_id);
+                        if let Some(w) = windows.iter().find(|w| w.id == window_id) {
                             if w.owner_app_id == Some(app_id) || w.owner_app_id.is_none() {
                                 w.pending_close.store(true, Ordering::SeqCst);
                             }
@@ -760,6 +799,11 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                         canvas_id, surface_handle, logical_w, logical_h, render_w, render_h,
                     } } => {
                         println!("[desktop-monitor] CanvasAttached on window {}: canvas={}", window_id, canvas_id);
+                        let target_canvas_id = windows
+                            .iter()
+                            .find(|w| w.id == window_id)
+                            .map(|w| w.target_canvas_id)
+                            .unwrap_or(canvas_id);
 
                         // Check if the window exists and is NOT pending closure.
                         if let Some(window) = windows.iter_mut().find(|w| w.id == window_id && !w.pending_close.load(Ordering::SeqCst)) {
@@ -775,8 +819,12 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                                 let pending_close = Arc::new(AtomicBool::new(false));
                                 let in_frame = Arc::new(AtomicBool::new(false));
                                 let attach = CanvasAttach {
-                                    canvas_id, surface_handle, logical_w, logical_h, render_w, render_h,
-                                    ml_info: None,
+                                    canvas_id,
+                                    surface_handle,
+                                    logical_w,
+                                    logical_h,
+                                    render_w,
+                                    render_h,
                                 };
                                 match build_attachment(hwnd, attach, pending_close.clone()) {
                                     Ok(a) => {
@@ -785,6 +833,7 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                                             id: window_id,
                                             hwnd,
                                             owner_app_id: None,
+                                            target_canvas_id,
                                             pending_close,
                                             in_frame,
                                             attachment: Some(a),
@@ -842,18 +891,6 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
             _ = tokio::time::sleep_until(next_tick) => {
                 next_tick += frame_interval;
 
-                let mut quit = false;
-                let mut msg = MSG::default();
-                while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
-                    if msg.message == WM_QUIT {
-                        quit = true;
-                    }
-                    unsafe {
-                        let _ = TranslateMessage(&msg);
-                        DispatchMessageW(&msg);
-                    }
-                }
-
                 for w in &windows {
                     if !w.pending_close.load(Ordering::SeqCst) {
                         w.in_frame.store(true, Ordering::SeqCst);
@@ -869,10 +906,6 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                 windows.retain(|w| {
                     !(w.pending_close.load(Ordering::SeqCst) && !w.in_frame.load(Ordering::SeqCst))
                 });
-
-                if quit {
-                    break;
-                }
             }
         }
     }

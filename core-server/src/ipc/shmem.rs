@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Memory::{
     CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
 };
@@ -29,7 +29,7 @@ impl SharedMemory {
 
         let handle = unsafe {
             CreateFileMappingW(
-                HANDLE::default(), // INVALID_HANDLE_VALUE backed by page file
+                INVALID_HANDLE_VALUE, // page-file backed mapping
                 None,
                 PAGE_READWRITE,
                 (size >> 32) as u32,
@@ -45,7 +45,9 @@ impl SharedMemory {
         let ptr = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size) };
 
         if ptr.Value.is_null() {
-            unsafe { let _ = CloseHandle(handle); }
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
             return Err(anyhow::anyhow!("Failed to map view of file"));
         }
 
@@ -80,13 +82,118 @@ impl SharedMemory {
     pub fn data_mut(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut u8, self.size) }
     }
+
+    pub fn command_slice(&self, offset: u32, length: u32, max_len: usize) -> anyhow::Result<&[u8]> {
+        let header_size = std::mem::size_of::<RingbufferHeader>();
+        let offset = offset as usize;
+        let length = length as usize;
+        if offset < header_size {
+            anyhow::bail!("command offset {} overlaps ringbuffer header", offset);
+        }
+        if length > max_len {
+            anyhow::bail!("command length {} exceeds max {}", length, max_len);
+        }
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| anyhow::anyhow!("command offset + length overflow"))?;
+        if end > self.size {
+            anyhow::bail!(
+                "command slice end {} exceeds mapping size {}",
+                end,
+                self.size
+            );
+        }
+
+        let capacity = self.header().capacity as usize;
+        if capacity > self.size {
+            anyhow::bail!(
+                "ringbuffer capacity {} exceeds mapping size {}",
+                capacity,
+                self.size
+            );
+        }
+        if end > capacity {
+            anyhow::bail!(
+                "command slice end {} exceeds ringbuffer capacity {}",
+                end,
+                capacity
+            );
+        }
+
+        Ok(&self.data()[offset..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_shmem() -> SharedMemory {
+        let name = format!(
+            "overlay-engine-shmem-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("anon")
+        );
+        SharedMemory::create(&name, 4096).unwrap()
+    }
+
+    #[test]
+    fn command_slice_accepts_valid_payload_region() {
+        let shmem = create_test_shmem();
+        let header_size = std::mem::size_of::<RingbufferHeader>() as u32;
+        let slice = shmem.command_slice(header_size, 16, 1024).unwrap();
+        assert_eq!(slice.len(), 16);
+    }
+
+    #[test]
+    fn command_slice_rejects_header_overlap() {
+        let shmem = create_test_shmem();
+        let err = shmem.command_slice(0, 16, 1024).unwrap_err().to_string();
+        assert!(err.contains("overlaps ringbuffer header"));
+    }
+
+    #[test]
+    fn command_slice_rejects_length_limit() {
+        let shmem = create_test_shmem();
+        let header_size = std::mem::size_of::<RingbufferHeader>() as u32;
+        let err = shmem
+            .command_slice(header_size, 2048, 1024)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds max"));
+    }
+
+    #[test]
+    fn command_slice_rejects_mapping_overflow() {
+        let shmem = create_test_shmem();
+        let err = shmem
+            .command_slice(u32::MAX - 1, 16, 1024)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds mapping size"));
+    }
+
+    #[test]
+    fn command_slice_rejects_capacity_overflow() {
+        let mut shmem = create_test_shmem();
+        shmem.header_mut().capacity = std::mem::size_of::<RingbufferHeader>() as u32 + 8;
+        let header_size = std::mem::size_of::<RingbufferHeader>() as u32;
+        let err = shmem
+            .command_slice(header_size, 16, 1024)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exceeds ringbuffer capacity"));
+    }
 }
 
 impl Drop for SharedMemory {
     fn drop(&mut self) {
         unsafe {
             if !self.ptr.is_null() {
-                let _ = UnmapViewOfFile(windows::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS { Value: self.ptr });
+                let _ =
+                    UnmapViewOfFile(windows::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS {
+                        Value: self.ptr,
+                    });
             }
             if !self.handle.is_invalid() {
                 let _ = CloseHandle(self.handle);

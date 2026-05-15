@@ -40,6 +40,11 @@ namespace OverlayWidget
         private XboxGameBarWidget _widget;
         private bool _calibrating;
         private Size? _calibratedSize;
+        private XamlRoot _subscribedXamlRoot;
+        private bool _isLoaded;
+        private bool _statusUpdateQueued;
+        private string _pendingRendererStatus;
+        private bool _sizeInfoUpdateQueued;
 
         public MainWidget()
         {
@@ -83,6 +88,7 @@ namespace OverlayWidget
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
+            _isLoaded = true;
             UpdateSizeInfo();
             UpdateMaxInfo();
             TryAttachSurface();
@@ -108,6 +114,7 @@ namespace OverlayWidget
             {
                 Debug.WriteLine("[OverlayWidget] OverlayPump.Start threw: " + ex);
                 RendererInfo.Text = "Attach failed: " + ex.GetType().Name + " " + ex.Message;
+                if (_pump != null) _pump.OnStatusChanged -= Pump_OnStatusChanged;
                 _pump?.Stop();
                 _pump = null;
             }
@@ -115,44 +122,84 @@ namespace OverlayWidget
 
         private void Pump_OnStatusChanged(string status)
         {
+            _pendingRendererStatus = status;
+            if (_statusUpdateQueued) return;
+
+            _statusUpdateQueued = true;
             _ = Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
-                RendererInfo.Text = status;
+                _statusUpdateQueued = false;
+                if (!_isLoaded || RendererInfo == null) return;
+
+                string pending = _pendingRendererStatus;
+                _pendingRendererStatus = null;
+                if (pending != null) RendererInfo.Text = pending;
             });
         }
 
         private void OnSizeChanged(object sender, SizeChangedEventArgs e)
         {
-            UpdateSizeInfo();
+            ScheduleSizeInfoUpdate();
+            _pump?.MarkLayoutDirty();
+        }
+
+        private void ScheduleSizeInfoUpdate()
+        {
+            if (!_isLoaded || _sizeInfoUpdateQueued) return;
+
+            _sizeInfoUpdateQueued = true;
+            _ = Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            {
+                _sizeInfoUpdateQueued = false;
+                if (!_isLoaded || SizeInfo == null) return;
+                UpdateSizeInfo();
+            });
         }
 
         private void TrySubscribeXamlRootChanged()
         {
-            if (XamlRoot == null) return;
-            try { XamlRoot.Changed += OnXamlRootChanged; }
+            XamlRoot root = XamlRoot;
+            if (root == null || ReferenceEquals(_subscribedXamlRoot, root)) return;
+
+            TryUnsubscribeXamlRootChanged();
+            try
+            {
+                root.Changed += OnXamlRootChanged;
+                _subscribedXamlRoot = root;
+            }
             catch (Exception ex) { Debug.WriteLine($"[OverlayWidget] subscribe XamlRoot.Changed failed: {ex.Message}"); }
         }
 
         private void TryUnsubscribeXamlRootChanged()
         {
-            if (XamlRoot == null) return;
-            try { XamlRoot.Changed -= OnXamlRootChanged; }
+            XamlRoot root = _subscribedXamlRoot;
+            if (root == null) return;
+
+            try { root.Changed -= OnXamlRootChanged; }
             catch (Exception ex) { Debug.WriteLine($"[OverlayWidget] unsubscribe XamlRoot.Changed failed: {ex.Message}"); }
+            _subscribedXamlRoot = null;
         }
 
         private void OnXamlRootChanged(XamlRoot sender, XamlRootChangedEventArgs args)
         {
-            UpdateSizeInfo();
+            ScheduleSizeInfoUpdate();
+            UpdateMaxInfo();
+            _pump?.MarkLayoutDirty();
         }
 
         private void OnUnloaded(object sender, RoutedEventArgs e)
         {
+            _isLoaded = false;
             TryUnsubscribeXamlRootChanged();
             if (_pump != null)
             {
+                _pump.OnStatusChanged -= Pump_OnStatusChanged;
                 _pump.Dispose();
                 _pump = null;
             }
+            _pendingRendererStatus = null;
+            _statusUpdateQueued = false;
+            _sizeInfoUpdateQueued = false;
         }
 
         // ---------- Maximize / Reset ----------

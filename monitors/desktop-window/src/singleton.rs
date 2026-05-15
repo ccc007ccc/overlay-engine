@@ -119,7 +119,10 @@ pub fn decode_request(buf: &mut BytesMut) -> Result<SingletonRequest, SingletonF
 
 pub fn encode_response(resp: &SingletonResponse, buf: &mut BytesMut) {
     match resp {
-        SingletonResponse::Ack { pid, new_monitor_id } => {
+        SingletonResponse::Ack {
+            pid,
+            new_monitor_id,
+        } => {
             buf.put_u16_le(SINGLETON_OP_ACK);
             buf.put_u32_le(8);
             buf.put_u32_le(*pid);
@@ -148,12 +151,16 @@ pub fn decode_response(buf: &mut BytesMut) -> Result<SingletonResponse, Singleto
         }
         SINGLETON_OP_NACK => {
             if len < 2 {
-                return Err(SingletonFrameError::PayloadLengthMismatch { expected: 2, actual: len });
+                return Err(SingletonFrameError::PayloadLengthMismatch {
+                    expected: 2,
+                    actual: len,
+                });
             }
             require_remaining(buf, len as usize)?;
             let reason = buf.get_u16_le();
             let msg_bytes = buf.split_to((len - 2) as usize);
-            let message = String::from_utf8(msg_bytes.to_vec()).map_err(|_| SingletonFrameError::Utf8)?;
+            let message =
+                String::from_utf8(msg_bytes.to_vec()).map_err(|_| SingletonFrameError::Utf8)?;
             Ok(SingletonResponse::Nack { reason, message })
         }
         _ => Err(SingletonFrameError::UnknownOpcode(opcode)),
@@ -177,7 +184,10 @@ fn require_remaining(buf: &BytesMut, expected: usize) -> Result<(), SingletonFra
     if buf.remaining() >= expected {
         Ok(())
     } else {
-        Err(SingletonFrameError::BufferTooSmall { expected, actual: buf.remaining() })
+        Err(SingletonFrameError::BufferTooSmall {
+            expected,
+            actual: buf.remaining(),
+        })
     }
 }
 
@@ -188,10 +198,22 @@ mod tests {
 
     #[test]
     fn try_become_singleton_decision_table() {
-        assert_eq!(try_become_singleton(OsPipeState::NoPipe), Ok(BecomeOutcome::MonitorProcess));
-        assert_eq!(try_become_singleton(OsPipeState::PipeExistsAcceptsInWindow), Ok(BecomeOutcome::Launcher));
-        assert_eq!(try_become_singleton(OsPipeState::PipeExistsStale), Ok(BecomeOutcome::MonitorProcess));
-        assert_eq!(try_become_singleton(OsPipeState::Race), Err(TryBecomeErr::Race));
+        assert_eq!(
+            try_become_singleton(OsPipeState::NoPipe),
+            Ok(BecomeOutcome::MonitorProcess)
+        );
+        assert_eq!(
+            try_become_singleton(OsPipeState::PipeExistsAcceptsInWindow),
+            Ok(BecomeOutcome::Launcher)
+        );
+        assert_eq!(
+            try_become_singleton(OsPipeState::PipeExistsStale),
+            Ok(BecomeOutcome::MonitorProcess)
+        );
+        assert_eq!(
+            try_become_singleton(OsPipeState::Race),
+            Err(TryBecomeErr::Race)
+        );
     }
 
     #[test]
@@ -204,12 +226,17 @@ mod tests {
 
     #[test]
     fn request_and_response_roundtrip() {
-        let req = SingletonRequest::OpenWindow { target_canvas_id: 7 };
+        let req = SingletonRequest::OpenWindow {
+            target_canvas_id: 7,
+        };
         let mut buf = BytesMut::new();
         encode_request(req, &mut buf);
         assert_eq!(decode_request(&mut buf).unwrap(), req);
 
-        let resp = SingletonResponse::Ack { pid: 11, new_monitor_id: 3 };
+        let resp = SingletonResponse::Ack {
+            pid: 11,
+            new_monitor_id: 3,
+        };
         let mut buf = BytesMut::new();
         encode_response(&resp, &mut buf);
         assert_eq!(decode_response(&mut buf).unwrap(), resp);

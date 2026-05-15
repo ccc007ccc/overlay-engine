@@ -38,6 +38,82 @@ mod renderer;
 
 use std::ffi::c_void;
 
+const MAX_CANVAS_DIMENSION: u32 = 16_384;
+const MAX_TEXT_BYTES: usize = 64 * 1024;
+const MAX_BITMAP_BYTES: usize = 256 * 1024 * 1024;
+const MAX_PATH_BYTES: usize = 1024 * 1024;
+const MAX_VIDEO_PATH_BYTES: usize = 32 * 1024;
+const MAX_POLYLINE_POINTS: usize = 1_000_000;
+const MAX_GRADIENT_STOPS: usize = 4096;
+
+fn validate_dimension(value: i32) -> Result<u32, RendererStatus> {
+    if value <= 0 {
+        return Err(RENDERER_ERR_INVALID_PARAM);
+    }
+    let value = value as u32;
+    if value > MAX_CANVAS_DIMENSION {
+        return Err(RENDERER_ERR_RESOURCE_LIMIT);
+    }
+    Ok(value)
+}
+
+fn validate_u32_dimension(value: u32) -> RendererStatus {
+    if value == 0 {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    if value > MAX_CANVAS_DIMENSION {
+        return RENDERER_ERR_RESOURCE_LIMIT;
+    }
+    RENDERER_OK
+}
+
+fn validate_finite(values: &[f32]) -> bool {
+    values.iter().all(|v| v.is_finite())
+}
+
+unsafe fn ffi_u8_slice<'a>(
+    ptr: *const u8,
+    len: i32,
+    max_len: usize,
+    allow_empty: bool,
+) -> Result<&'a [u8], RendererStatus> {
+    if len < 0 || (!allow_empty && len == 0) {
+        return Err(RENDERER_ERR_INVALID_PARAM);
+    }
+    let len = len as usize;
+    if len > max_len {
+        return Err(RENDERER_ERR_RESOURCE_LIMIT);
+    }
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if ptr.is_null() {
+        return Err(RENDERER_ERR_INVALID_PARAM);
+    }
+    Ok(std::slice::from_raw_parts(ptr, len))
+}
+
+unsafe fn ffi_f32_slice<'a>(
+    ptr: *const f32,
+    count: usize,
+    max_count: usize,
+    allow_empty: bool,
+) -> Result<&'a [f32], RendererStatus> {
+    if count == 0 && !allow_empty {
+        return Err(RENDERER_ERR_INVALID_PARAM);
+    }
+    if count > max_count {
+        return Err(RENDERER_ERR_RESOURCE_LIMIT);
+    }
+    if count == 0 {
+        return Ok(&[]);
+    }
+    if ptr.is_null() {
+        return Err(RENDERER_ERR_INVALID_PARAM);
+    }
+    Ok(std::slice::from_raw_parts(ptr, count))
+}
+
 pub use crate::ffi::{
     LogCallbackFn, PerfStats, Renderer, RendererStatus, VideoInfo, RENDERER_ERR_CANVAS_RESIZE_FAIL,
     RENDERER_ERR_CAPTURE_INIT, RENDERER_ERR_DECODE_FAIL, RENDERER_ERR_DEVICE_INIT,
@@ -63,13 +139,18 @@ pub unsafe extern "system" fn renderer_create(
     if out_handle.is_null() {
         return RENDERER_ERR_INVALID_PARAM;
     }
-    if pixel_width <= 0 || pixel_height <= 0 {
-        return RENDERER_ERR_INVALID_PARAM;
-    }
+    let pixel_width = match validate_dimension(pixel_width) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let pixel_height = match validate_dimension(pixel_height) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     crate::log::clear_last_error();
 
-    match Renderer::new(pixel_width as u32, pixel_height as u32) {
+    match Renderer::new(pixel_width, pixel_height) {
         Ok(r) => {
             *out_handle = Box::into_raw(Box::new(r));
             RENDERER_OK
@@ -89,11 +170,19 @@ pub unsafe extern "system" fn renderer_resize(
     pixel_width: i32,
     pixel_height: i32,
 ) -> RendererStatus {
-    if handle.is_null() || pixel_width <= 0 || pixel_height <= 0 {
+    if handle.is_null() {
         return RENDERER_ERR_INVALID_PARAM;
     }
+    let pixel_width = match validate_dimension(pixel_width) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let pixel_height = match validate_dimension(pixel_height) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let r = &*handle;
-    match r.resize(pixel_width as u32, pixel_height as u32) {
+    match r.resize(pixel_width, pixel_height) {
         Ok(()) => RENDERER_OK,
         Err(e) => {
             crate::log::emit(4, &format!("renderer_resize failed: {}", e));
@@ -125,11 +214,19 @@ pub unsafe extern "system" fn renderer_resize_canvas(
     new_w: i32,
     new_h: i32,
 ) -> RendererStatus {
-    if handle.is_null() || new_w <= 0 || new_h <= 0 {
+    if handle.is_null() {
         return RENDERER_ERR_INVALID_PARAM;
     }
+    let new_w = match validate_dimension(new_w) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let new_h = match validate_dimension(new_h) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let r = &*handle;
-    match r.resize_canvas(new_w as u32, new_h as u32) {
+    match r.resize_canvas(new_w, new_h) {
         Ok(()) => RENDERER_OK,
         Err(e) => {
             crate::log::emit(4, &format!("renderer_resize_canvas failed: {}", e));
@@ -211,7 +308,7 @@ pub unsafe extern "system" fn renderer_begin_frame(
     out_canvas_w: *mut i32,
     out_canvas_h: *mut i32,
 ) -> RendererStatus {
-    if handle.is_null() {
+    if handle.is_null() || !validate_finite(&[viewport_x, viewport_y, viewport_w, viewport_h]) {
         return RENDERER_ERR_INVALID_PARAM;
     }
     let r = &*handle;
@@ -245,7 +342,7 @@ pub unsafe extern "system" fn renderer_clear(
     b: f32,
     a: f32,
 ) -> RendererStatus {
-    if handle.is_null() {
+    if handle.is_null() || !validate_finite(&[r, g, b, a]) {
         return RENDERER_ERR_INVALID_PARAM;
     }
     let renderer = &*handle;
@@ -272,7 +369,7 @@ pub unsafe extern "system" fn renderer_fill_rect(
     b: f32,
     a: f32,
 ) -> RendererStatus {
-    if handle.is_null() {
+    if handle.is_null() || !validate_finite(&[x, y, w, h, r, g, b, a]) {
         return RENDERER_ERR_INVALID_PARAM;
     }
     let renderer = &*handle;
@@ -300,23 +397,19 @@ pub unsafe extern "system" fn renderer_draw_text(
     b: f32,
     a: f32,
 ) -> RendererStatus {
-    if handle.is_null() || utf8_len < 0 {
+    if handle.is_null() || !validate_finite(&[x, y, font_size, r, g, b, a]) {
         return RENDERER_ERR_INVALID_PARAM;
     }
     let renderer = &*handle;
-    let text: &str = if utf8_len == 0 {
-        ""
-    } else {
-        if utf8.is_null() {
+    let slice = match ffi_u8_slice(utf8, utf8_len, MAX_TEXT_BYTES, true) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let text = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => {
+            crate::log::emit(4, "renderer_draw_text: invalid UTF-8 input");
             return RENDERER_ERR_INVALID_PARAM;
-        }
-        let slice = std::slice::from_raw_parts(utf8, utf8_len as usize);
-        match std::str::from_utf8(slice) {
-            Ok(s) => s,
-            Err(_) => {
-                crate::log::emit(4, "renderer_draw_text: invalid UTF-8 input");
-                return RENDERER_ERR_INVALID_PARAM;
-            }
         }
     };
     match renderer.cmd_draw_text(text, x, y, font_size, [r, g, b, a]) {
@@ -405,19 +498,29 @@ pub unsafe extern "system" fn renderer_draw_polyline(
     a: f32,
     closed: i32,
 ) -> RendererStatus {
-    if handle.is_null() || point_count < 0 {
+    if handle.is_null() || point_count < 0 || !validate_finite(&[stroke_width, r, g, b, a]) {
         return RENDERER_ERR_INVALID_PARAM;
     }
     if point_count < 2 {
         // 0 / 1 个点画不出线段，但不视为错误（业务方可能传空数组），no-op
         return RENDERER_OK;
     }
-    if points.is_null() {
+    let n = point_count as usize;
+    if n > MAX_POLYLINE_POINTS {
+        return RENDERER_ERR_RESOURCE_LIMIT;
+    }
+    let scalar_count = match n.checked_mul(2) {
+        Some(v) => v,
+        None => return RENDERER_ERR_RESOURCE_LIMIT,
+    };
+    let raw = match ffi_f32_slice(points, scalar_count, MAX_POLYLINE_POINTS * 2, false) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if !validate_finite(raw) {
         return RENDERER_ERR_INVALID_PARAM;
     }
     let renderer = &*handle;
-    let n = point_count as usize;
-    let raw = std::slice::from_raw_parts(points, n * 2);
     let mut pts: Vec<(f32, f32)> = Vec::with_capacity(n);
     for i in 0..n {
         pts.push((raw[i * 2], raw[i * 2 + 1]));
@@ -629,10 +732,16 @@ pub unsafe extern "system" fn renderer_set_transform(
     handle: *mut Renderer,
     matrix: *const f32,
 ) -> RendererStatus {
-    if handle.is_null() || matrix.is_null() {
+    if handle.is_null() {
         return RENDERER_ERR_INVALID_PARAM;
     }
-    let raw = std::slice::from_raw_parts(matrix, 6);
+    let raw = match ffi_f32_slice(matrix, 6, 6, false) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if !validate_finite(raw) {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
     let m: [f32; 6] = [raw[0], raw[1], raw[2], raw[3], raw[4], raw[5]];
     let renderer = &*handle;
     match renderer.cmd_set_transform(m) {
@@ -646,9 +755,7 @@ pub unsafe extern "system" fn renderer_set_transform(
 
 /// 重置 transform 为 viewport 平移（v0.6 默认状态）。
 #[no_mangle]
-pub unsafe extern "system" fn renderer_reset_transform(
-    handle: *mut Renderer,
-) -> RendererStatus {
+pub unsafe extern "system" fn renderer_reset_transform(handle: *mut Renderer) -> RendererStatus {
     if handle.is_null() {
         return RENDERER_ERR_INVALID_PARAM;
     }
@@ -674,14 +781,20 @@ pub unsafe extern "system" fn renderer_load_bitmap_from_memory(
     byte_len: i32,
     out_handle: *mut u32,
 ) -> RendererStatus {
-    if handle.is_null() || out_handle.is_null() || bytes.is_null() || byte_len <= 0 {
+    if handle.is_null() || out_handle.is_null() {
         return RENDERER_ERR_INVALID_PARAM;
     }
     *out_handle = 0;
+    let slice = match ffi_u8_slice(bytes, byte_len, MAX_BITMAP_BYTES, false) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
     let renderer = &*handle;
-    let slice = std::slice::from_raw_parts(bytes, byte_len as usize);
     match renderer.load_bitmap_from_memory(slice) {
-        Ok(h) => { *out_handle = h; RENDERER_OK }
+        Ok(h) => {
+            *out_handle = h;
+            RENDERER_OK
+        }
         Err(e) => {
             crate::log::emit(4, &format!("renderer_load_bitmap_from_memory: {}", e));
             e.to_status()
@@ -697,11 +810,14 @@ pub unsafe extern "system" fn renderer_load_bitmap_from_file(
     path_len: i32,
     out_handle: *mut u32,
 ) -> RendererStatus {
-    if handle.is_null() || out_handle.is_null() || utf8_path.is_null() || path_len <= 0 {
+    if handle.is_null() || out_handle.is_null() {
         return RENDERER_ERR_INVALID_PARAM;
     }
     *out_handle = 0;
-    let path_slice = std::slice::from_raw_parts(utf8_path, path_len as usize);
+    let path_slice = match ffi_u8_slice(utf8_path, path_len, MAX_VIDEO_PATH_BYTES, false) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
     let path_str = match std::str::from_utf8(path_slice) {
         Ok(s) => s,
         Err(_) => {
@@ -718,7 +834,10 @@ pub unsafe extern "system" fn renderer_load_bitmap_from_file(
     };
     let renderer = &*handle;
     match renderer.load_bitmap_from_memory(&bytes) {
-        Ok(h) => { *out_handle = h; RENDERER_OK }
+        Ok(h) => {
+            *out_handle = h;
+            RENDERER_OK
+        }
         Err(e) => {
             crate::log::emit(4, &format!("renderer_load_bitmap_from_file: decode {}", e));
             e.to_status()
@@ -738,10 +857,21 @@ pub unsafe extern "system" fn renderer_create_texture(
     if handle.is_null() || out_handle.is_null() {
         return RENDERER_ERR_INVALID_PARAM;
     }
+    let width_status = validate_u32_dimension(width);
+    if width_status != RENDERER_OK {
+        return width_status;
+    }
+    let height_status = validate_u32_dimension(height);
+    if height_status != RENDERER_OK {
+        return height_status;
+    }
     *out_handle = 0;
     let renderer = &*handle;
     match renderer.create_texture(width, height, format) {
-        Ok(h) => { *out_handle = h; RENDERER_OK }
+        Ok(h) => {
+            *out_handle = h;
+            RENDERER_OK
+        }
         Err(e) => {
             crate::log::emit(4, &format!("renderer_create_texture: {}", e));
             e.to_status()
@@ -759,11 +889,14 @@ pub unsafe extern "system" fn renderer_update_texture(
     stride: i32,
     format: i32,
 ) -> RendererStatus {
-    if handle.is_null() || bytes.is_null() || byte_len <= 0 {
+    if handle.is_null() {
         return RENDERER_ERR_INVALID_PARAM;
     }
+    let slice = match ffi_u8_slice(bytes, byte_len, MAX_BITMAP_BYTES, false) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
     let renderer = &*handle;
-    let slice = std::slice::from_raw_parts(bytes, byte_len as usize);
     match renderer.update_texture(bitmap, slice, stride, format) {
         Ok(()) => RENDERER_OK,
         Err(e) => {
@@ -786,7 +919,11 @@ pub unsafe extern "system" fn renderer_get_bitmap_size(
     }
     let renderer = &*handle;
     match renderer.get_bitmap_size(bitmap) {
-        Ok((w, h)) => { *out_width = w; *out_height = h; RENDERER_OK }
+        Ok((w, h)) => {
+            *out_width = w;
+            *out_height = h;
+            RENDERER_OK
+        }
         Err(e) => {
             crate::log::emit(4, &format!("renderer_get_bitmap_size: {}", e));
             e.to_status()
@@ -819,8 +956,14 @@ pub unsafe extern "system" fn renderer_destroy_bitmap(
 pub unsafe extern "system" fn renderer_draw_bitmap(
     handle: *mut Renderer,
     bitmap: u32,
-    src_x: f32, src_y: f32, src_w: f32, src_h: f32,
-    dst_x: f32, dst_y: f32, dst_w: f32, dst_h: f32,
+    src_x: f32,
+    src_y: f32,
+    src_w: f32,
+    src_h: f32,
+    dst_x: f32,
+    dst_y: f32,
+    dst_w: f32,
+    dst_h: f32,
     opacity: f32,
     interp_mode: i32,
 ) -> RendererStatus {
@@ -829,7 +972,17 @@ pub unsafe extern "system" fn renderer_draw_bitmap(
     }
     let renderer = &*handle;
     match renderer.cmd_draw_bitmap(
-        bitmap, src_x, src_y, src_w, src_h, dst_x, dst_y, dst_w, dst_h, opacity, interp_mode,
+        bitmap,
+        src_x,
+        src_y,
+        src_w,
+        src_h,
+        dst_x,
+        dst_y,
+        dst_w,
+        dst_h,
+        opacity,
+        interp_mode,
     ) {
         Ok(()) => RENDERER_OK,
         Err(e) => {
@@ -945,11 +1098,14 @@ pub unsafe extern "system" fn renderer_fill_path(
     b: f32,
     a: f32,
 ) -> RendererStatus {
-    if handle.is_null() || path_bytes.is_null() || path_len < 0 {
+    if handle.is_null() || !validate_finite(&[r, g, b, a]) {
         return RENDERER_ERR_INVALID_PARAM;
     }
+    let path = match ffi_u8_slice(path_bytes, path_len, MAX_PATH_BYTES, true) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
     let renderer = &*handle;
-    let path = std::slice::from_raw_parts(path_bytes, path_len as usize);
     match renderer.cmd_fill_path(path, [r, g, b, a]) {
         Ok(()) => RENDERER_OK,
         Err(e) => {
@@ -972,11 +1128,14 @@ pub unsafe extern "system" fn renderer_stroke_path(
     a: f32,
     dash_style: i32,
 ) -> RendererStatus {
-    if handle.is_null() || path_bytes.is_null() || path_len < 0 {
+    if handle.is_null() || !validate_finite(&[stroke_width, r, g, b, a]) {
         return RENDERER_ERR_INVALID_PARAM;
     }
+    let path = match ffi_u8_slice(path_bytes, path_len, MAX_PATH_BYTES, true) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
     let renderer = &*handle;
-    let path = std::slice::from_raw_parts(path_bytes, path_len as usize);
     match renderer.cmd_stroke_path(path, stroke_width, [r, g, b, a], dash_style) {
         Ok(()) => RENDERER_OK,
         Err(e) => {
@@ -1002,13 +1161,28 @@ pub unsafe extern "system" fn renderer_fill_rect_gradient_linear(
     stops: *const f32,
     stop_count: i32,
 ) -> RendererStatus {
-    if handle.is_null() || stops.is_null() || stop_count < 2 {
+    if handle.is_null()
+        || stop_count < 2
+        || !validate_finite(&[x, y, w, h, start_x, start_y, end_x, end_y])
+    {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let stop_count = stop_count as usize;
+    if stop_count > MAX_GRADIENT_STOPS {
+        return RENDERER_ERR_RESOURCE_LIMIT;
+    }
+    let float_count = match stop_count.checked_mul(5) {
+        Some(v) => v,
+        None => return RENDERER_ERR_RESOURCE_LIMIT,
+    };
+    let slice = match ffi_f32_slice(stops, float_count, MAX_GRADIENT_STOPS * 5, false) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if !validate_finite(slice) {
         return RENDERER_ERR_INVALID_PARAM;
     }
     let renderer = &*handle;
-    // stop_count = 逻辑 stop 数量（不是 float 数）；float 数 = stop_count * 5
-    let float_count = (stop_count as usize).saturating_mul(5);
-    let slice = std::slice::from_raw_parts(stops, float_count);
     match renderer.cmd_fill_rect_gradient_linear(x, y, w, h, start_x, start_y, end_x, end_y, slice)
     {
         Ok(()) => RENDERER_OK,
@@ -1034,12 +1208,28 @@ pub unsafe extern "system" fn renderer_fill_rect_gradient_radial(
     stops: *const f32,
     stop_count: i32,
 ) -> RendererStatus {
-    if handle.is_null() || stops.is_null() || stop_count < 2 {
+    if handle.is_null()
+        || stop_count < 2
+        || !validate_finite(&[x, y, w, h, center_x, center_y, radius_x, radius_y])
+    {
+        return RENDERER_ERR_INVALID_PARAM;
+    }
+    let stop_count = stop_count as usize;
+    if stop_count > MAX_GRADIENT_STOPS {
+        return RENDERER_ERR_RESOURCE_LIMIT;
+    }
+    let float_count = match stop_count.checked_mul(5) {
+        Some(v) => v,
+        None => return RENDERER_ERR_RESOURCE_LIMIT,
+    };
+    let slice = match ffi_f32_slice(stops, float_count, MAX_GRADIENT_STOPS * 5, false) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if !validate_finite(slice) {
         return RENDERER_ERR_INVALID_PARAM;
     }
     let renderer = &*handle;
-    let float_count = (stop_count as usize).saturating_mul(5);
-    let slice = std::slice::from_raw_parts(stops, float_count);
     match renderer
         .cmd_fill_rect_gradient_radial(x, y, w, h, center_x, center_y, radius_x, radius_y, slice)
     {
@@ -1068,12 +1258,15 @@ pub unsafe extern "system" fn renderer_video_open_file(
     path_len: i32,
     out_video_handle: *mut u32,
 ) -> RendererStatus {
-    if handle.is_null() || utf8_path.is_null() || path_len <= 0 || out_video_handle.is_null() {
+    if handle.is_null() || out_video_handle.is_null() {
         return RENDERER_ERR_INVALID_PARAM;
     }
     *out_video_handle = 0;
+    let bytes = match ffi_u8_slice(utf8_path, path_len, MAX_VIDEO_PATH_BYTES, false) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
     let renderer = &*handle;
-    let bytes = std::slice::from_raw_parts(utf8_path, path_len as usize);
     let path = match std::str::from_utf8(bytes) {
         Ok(s) => s,
         Err(_) => return RENDERER_ERR_INVALID_PARAM,
@@ -1207,10 +1400,7 @@ pub unsafe extern "system" fn renderer_get_perf_stats(
 
 /// 拷贝最近一条 ERROR 级别的日志到 buf。
 #[no_mangle]
-pub unsafe extern "system" fn renderer_last_error_string(
-    buf: *mut u8,
-    buf_len: usize,
-) -> usize {
+pub unsafe extern "system" fn renderer_last_error_string(buf: *mut u8, buf_len: usize) -> usize {
     let s = match crate::log::last_error_string() {
         Some(s) => s,
         None => {
@@ -1244,14 +1434,27 @@ mod tests {
     fn make_renderer(w: i32, h: i32) -> *mut Renderer {
         let mut handle: *mut Renderer = std::ptr::null_mut();
         let status = unsafe { renderer_create(w, h, &mut handle as *mut _) };
-        assert_eq!(status, RENDERER_OK, "create should succeed on machine with D3D11 GPU");
+        assert_eq!(
+            status, RENDERER_OK,
+            "create should succeed on machine with D3D11 GPU"
+        );
         assert!(!handle.is_null());
         handle
     }
 
     /// v0.6 DComp 业务侧典型用法的 helper：begin → 一组命令 → end。
     fn run_cmd_frame(h: *mut Renderer, w: i32, h_: i32) {
-        let st = unsafe { renderer_begin_frame(h, 0.0, 0.0, w as f32, h_ as f32, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st = unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                w as f32,
+                h_ as f32,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st, RENDERER_OK);
         let st = unsafe { renderer_clear(h, 0.0, 0.0, 0.05, 0.30) };
         assert_eq!(st, RENDERER_OK);
@@ -1297,14 +1500,114 @@ mod tests {
     }
 
     #[test]
+    fn ffi_rejects_oversized_dimensions_at_boundary() {
+        let mut handle: *mut Renderer = std::ptr::null_mut();
+        let status =
+            unsafe { renderer_create((MAX_CANVAS_DIMENSION + 1) as i32, 100, &mut handle) };
+        assert_eq!(status, RENDERER_ERR_RESOURCE_LIMIT);
+        assert!(handle.is_null());
+    }
+
+    #[test]
+    fn ffi_rejects_non_finite_begin_frame_values() {
+        let h = make_renderer(640, 480);
+        let status = unsafe {
+            renderer_begin_frame(
+                h,
+                f32::NAN,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, RENDERER_ERR_INVALID_PARAM);
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn ffi_rejects_oversized_raw_lengths_before_slicing() {
+        let h = make_renderer(640, 480);
+        let data = [0u8; 1];
+        let mut out = 0u32;
+
+        let status = unsafe {
+            renderer_draw_text(
+                h,
+                data.as_ptr(),
+                (MAX_TEXT_BYTES + 1) as i32,
+                0.0,
+                0.0,
+                12.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+            )
+        };
+        assert_eq!(status, RENDERER_ERR_RESOURCE_LIMIT);
+
+        let status = unsafe {
+            renderer_load_bitmap_from_memory(
+                h,
+                data.as_ptr(),
+                (MAX_BITMAP_BYTES + 1) as i32,
+                &mut out,
+            )
+        };
+        assert_eq!(status, RENDERER_ERR_RESOURCE_LIMIT);
+
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
+    fn ffi_rejects_oversized_vector_counts_before_slicing() {
+        let h = make_renderer(640, 480);
+        let point = [0.0f32; 2];
+        let status = unsafe {
+            renderer_draw_polyline(
+                h,
+                point.as_ptr(),
+                (MAX_POLYLINE_POINTS + 1) as i32,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                0,
+            )
+        };
+        assert_eq!(status, RENDERER_ERR_RESOURCE_LIMIT);
+
+        let stops = [0.0f32; 10];
+        let status = unsafe {
+            renderer_fill_rect_gradient_linear(
+                h,
+                0.0,
+                0.0,
+                10.0,
+                10.0,
+                0.0,
+                0.0,
+                10.0,
+                10.0,
+                stops.as_ptr(),
+                (MAX_GRADIENT_STOPS + 1) as i32,
+            )
+        };
+        assert_eq!(status, RENDERER_ERR_RESOURCE_LIMIT);
+
+        unsafe { renderer_destroy(h) };
+    }
+
+    #[test]
     fn begin_frame_writes_canvas_size_to_outparams() {
         // v0.7：begin_frame 应该写出当前画布尺寸到 out_canvas_w / out_canvas_h
         let h = make_renderer(1280, 720);
         let mut cw: i32 = -1;
         let mut ch: i32 = -1;
-        let status = unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 1280.0, 720.0, &mut cw, &mut ch)
-        };
+        let status = unsafe { renderer_begin_frame(h, 0.0, 0.0, 1280.0, 720.0, &mut cw, &mut ch) };
         assert_eq!(status, RENDERER_OK);
         assert_eq!(cw, 1280);
         assert_eq!(ch, 720);
@@ -1318,7 +1621,15 @@ mod tests {
         // v0.6 调用方传 NULL 出参 → 不 crash，正常返回 OK
         let h = make_renderer(640, 480);
         let status = unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
         assert_eq!(status, RENDERER_OK);
         let _ = unsafe { renderer_end_frame(h) };
@@ -1361,10 +1672,22 @@ mod tests {
     #[test]
     fn resize_canvas_zero_or_negative_size_rejected() {
         let h = make_renderer(640, 480);
-        assert_eq!(unsafe { renderer_resize_canvas(h, 0, 480) }, RENDERER_ERR_INVALID_PARAM);
-        assert_eq!(unsafe { renderer_resize_canvas(h, 640, 0) }, RENDERER_ERR_INVALID_PARAM);
-        assert_eq!(unsafe { renderer_resize_canvas(h, -1, 480) }, RENDERER_ERR_INVALID_PARAM);
-        assert_eq!(unsafe { renderer_resize_canvas(h, 640, -10) }, RENDERER_ERR_INVALID_PARAM);
+        assert_eq!(
+            unsafe { renderer_resize_canvas(h, 0, 480) },
+            RENDERER_ERR_INVALID_PARAM
+        );
+        assert_eq!(
+            unsafe { renderer_resize_canvas(h, 640, 0) },
+            RENDERER_ERR_INVALID_PARAM
+        );
+        assert_eq!(
+            unsafe { renderer_resize_canvas(h, -1, 480) },
+            RENDERER_ERR_INVALID_PARAM
+        );
+        assert_eq!(
+            unsafe { renderer_resize_canvas(h, 640, -10) },
+            RENDERER_ERR_INVALID_PARAM
+        );
         // size 不变（原 640×480）
         let mut cw: i32 = 0;
         let mut ch: i32 = 0;
@@ -1403,7 +1726,15 @@ mod tests {
         // begin_frame 之后调 resize_canvas → -6 FRAME_HELD（spec §2.6.3）
         let h = make_renderer(640, 480);
         let st = unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
         assert_eq!(st, RENDERER_OK);
         // 帧内 resize 必须拒绝
@@ -1464,7 +1795,17 @@ mod tests {
     fn cmd_mode_roundtrip_clear_and_text() {
         let h = make_renderer(640, 480);
 
-        let st = unsafe { renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st = unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st, RENDERER_OK);
 
         let st = unsafe { renderer_clear(h, 0.0, 0.0, 0.05, 0.30) };
@@ -1515,9 +1856,29 @@ mod tests {
     #[test]
     fn double_begin_returns_invalid_param() {
         let h = make_renderer(640, 480);
-        let st = unsafe { renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st = unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st, RENDERER_OK);
-        let st2 = unsafe { renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st2 = unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st2, RENDERER_ERR_INVALID_PARAM);
 
         unsafe { renderer_end_frame(h) };
@@ -1527,7 +1888,17 @@ mod tests {
     #[test]
     fn cmd_mode_resize_in_middle_recovers() {
         let h = make_renderer(640, 480);
-        let st = unsafe { renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st = unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st, RENDERER_OK);
         let st2 = unsafe { renderer_clear(h, 0.0, 0.0, 0.0, 1.0) };
         assert_eq!(st2, RENDERER_OK);
@@ -1536,7 +1907,17 @@ mod tests {
         assert_eq!(r, RENDERER_OK);
 
         // resize 后应能重新 begin_frame
-        let st3 = unsafe { renderer_begin_frame(h, 0.0, 0.0, 1280.0, 720.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st3 = unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                1280.0,
+                720.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st3, RENDERER_OK);
         let st4 = unsafe { renderer_end_frame(h) };
         assert_eq!(st4, RENDERER_OK);
@@ -1576,7 +1957,17 @@ mod tests {
     #[test]
     fn double_end_returns_invalid_param() {
         let h = make_renderer(640, 480);
-        unsafe { renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         unsafe { renderer_clear(h, 0.0, 0.0, 0.0, 1.0) };
 
         let st = unsafe { renderer_end_frame(h) };
@@ -1592,7 +1983,17 @@ mod tests {
     #[test]
     fn viewport_smaller_than_canvas_runs() {
         let h = make_renderer(1280, 720);
-        let st = unsafe { renderer_begin_frame(h, 200.0, 150.0, 800.0, 600.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st = unsafe {
+            renderer_begin_frame(
+                h,
+                200.0,
+                150.0,
+                800.0,
+                600.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st, RENDERER_OK);
         unsafe { renderer_clear(h, 0.0, 0.0, 0.05, 0.30) };
         unsafe { renderer_fill_rect(h, 600.0, 350.0, 80.0, 80.0, 0.2, 0.4, 0.8, 0.9) };
@@ -1604,13 +2005,33 @@ mod tests {
     #[test]
     fn viewport_resize_across_frames_rebuilds_swap_chain() {
         let h = make_renderer(2560, 1440);
-        let st = unsafe { renderer_begin_frame(h, 100.0, 100.0, 800.0, 600.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st = unsafe {
+            renderer_begin_frame(
+                h,
+                100.0,
+                100.0,
+                800.0,
+                600.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st, RENDERER_OK);
         unsafe { renderer_clear(h, 0.0, 0.0, 0.0, 0.0) };
         unsafe { renderer_end_frame(h) };
 
         // 第二帧：viewport 变成 1024x768 → swap chain ResizeBuffers
-        let st = unsafe { renderer_begin_frame(h, 50.0, 50.0, 1024.0, 768.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st = unsafe {
+            renderer_begin_frame(
+                h,
+                50.0,
+                50.0,
+                1024.0,
+                768.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st, RENDERER_OK);
         unsafe { renderer_clear(h, 0.0, 0.0, 0.0, 0.0) };
         let st = unsafe { renderer_end_frame(h) };
@@ -1621,7 +2042,17 @@ mod tests {
     #[test]
     fn viewport_partially_outside_canvas_ok() {
         let h = make_renderer(1920, 1080);
-        let st = unsafe { renderer_begin_frame(h, -100.0, -50.0, 800.0, 600.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st = unsafe {
+            renderer_begin_frame(
+                h,
+                -100.0,
+                -50.0,
+                800.0,
+                600.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st, RENDERER_OK);
         unsafe { renderer_clear(h, 0.0, 0.0, 0.0, 0.0) };
         unsafe { renderer_fill_rect(h, 0.0, 0.0, 200.0, 200.0, 0.5, 0.5, 0.5, 0.8) };
@@ -1640,21 +2071,31 @@ mod tests {
     fn cmd_v07_full_roundtrip_in_one_frame() {
         // 一帧内连续调所有 11 个新命令 + 3 个老命令，全部应返 OK
         let h = make_renderer(800, 600);
-        let st = unsafe { renderer_begin_frame(h, 0.0, 0.0, 800.0, 600.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let st = unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                800.0,
+                600.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(st, RENDERER_OK);
         unsafe { renderer_clear(h, 0.0, 0.0, 0.05, 1.0) };
 
         // 矢量图元
-        let s = unsafe { renderer_draw_line(h, 10.0, 10.0, 100.0, 100.0, 2.0, 1.0, 0.5, 0.0, 1.0, 0) };
+        let s =
+            unsafe { renderer_draw_line(h, 10.0, 10.0, 100.0, 100.0, 2.0, 1.0, 0.5, 0.0, 1.0, 0) };
         assert_eq!(s, RENDERER_OK);
 
         let pts: [f32; 8] = [10.0, 200.0, 50.0, 240.0, 90.0, 200.0, 130.0, 260.0];
-        let s = unsafe {
-            renderer_draw_polyline(h, pts.as_ptr(), 4, 1.5, 0.2, 0.8, 0.4, 1.0, 0)
-        };
+        let s = unsafe { renderer_draw_polyline(h, pts.as_ptr(), 4, 1.5, 0.2, 0.8, 0.4, 1.0, 0) };
         assert_eq!(s, RENDERER_OK);
 
-        let s = unsafe { renderer_stroke_rect(h, 200.0, 50.0, 100.0, 60.0, 1.0, 1.0, 1.0, 1.0, 1.0) };
+        let s =
+            unsafe { renderer_stroke_rect(h, 200.0, 50.0, 100.0, 60.0, 1.0, 1.0, 1.0, 1.0, 1.0) };
         assert_eq!(s, RENDERER_OK);
 
         let s = unsafe {
@@ -1672,9 +2113,8 @@ mod tests {
         let s = unsafe { renderer_fill_ellipse(h, 600.0, 80.0, 40.0, 30.0, 0.8, 0.2, 0.2, 0.9) };
         assert_eq!(s, RENDERER_OK);
 
-        let s = unsafe {
-            renderer_stroke_ellipse(h, 700.0, 80.0, 40.0, 30.0, 1.5, 0.2, 0.8, 0.2, 1.0)
-        };
+        let s =
+            unsafe { renderer_stroke_ellipse(h, 700.0, 80.0, 40.0, 30.0, 1.5, 0.2, 0.8, 0.2, 1.0) };
         assert_eq!(s, RENDERER_OK);
 
         // 状态命令：clip 栈
@@ -1754,9 +2194,7 @@ mod tests {
         };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
 
-        let s = unsafe {
-            renderer_set_transform(std::ptr::null_mut(), m.as_ptr())
-        };
+        let s = unsafe { renderer_set_transform(std::ptr::null_mut(), m.as_ptr()) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
 
         let s = unsafe { renderer_pop_clip(std::ptr::null_mut()) };
@@ -1767,31 +2205,35 @@ mod tests {
     fn cmd_polyline_invalid_inputs() {
         // null pointer + 负 count + 单点都要安全处理
         let h = make_renderer(640, 480);
-        unsafe { renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
 
         // null 数组
-        let s = unsafe {
-            renderer_draw_polyline(h, std::ptr::null(), 3, 1.0, 1.0, 1.0, 1.0, 1.0, 0)
-        };
+        let s =
+            unsafe { renderer_draw_polyline(h, std::ptr::null(), 3, 1.0, 1.0, 1.0, 1.0, 1.0, 0) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
 
         // 负点数
         let pts: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
-        let s = unsafe {
-            renderer_draw_polyline(h, pts.as_ptr(), -1, 1.0, 1.0, 1.0, 1.0, 1.0, 0)
-        };
+        let s = unsafe { renderer_draw_polyline(h, pts.as_ptr(), -1, 1.0, 1.0, 1.0, 1.0, 1.0, 0) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
 
         // 单点：no-op，但返 OK（业务方可能传空数组场景）
-        let s = unsafe {
-            renderer_draw_polyline(h, pts.as_ptr(), 1, 1.0, 1.0, 1.0, 1.0, 1.0, 0)
-        };
+        let s = unsafe { renderer_draw_polyline(h, pts.as_ptr(), 1, 1.0, 1.0, 1.0, 1.0, 1.0, 0) };
         assert_eq!(s, RENDERER_OK);
 
         // 0 点：no-op，OK
-        let s = unsafe {
-            renderer_draw_polyline(h, std::ptr::null(), 0, 1.0, 1.0, 1.0, 1.0, 1.0, 0)
-        };
+        let s =
+            unsafe { renderer_draw_polyline(h, std::ptr::null(), 0, 1.0, 1.0, 1.0, 1.0, 1.0, 0) };
         assert_eq!(s, RENDERER_OK);
 
         unsafe { renderer_end_frame(h) };
@@ -1802,7 +2244,17 @@ mod tests {
     fn cmd_v07_clip_stack_push_pop_balance() {
         // 嵌套 clip：push push fill pop pop —— 验证栈可工作
         let h = make_renderer(800, 600);
-        unsafe { renderer_begin_frame(h, 0.0, 0.0, 800.0, 600.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                800.0,
+                600.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
 
         let s = unsafe { renderer_push_clip_rect(h, 50.0, 50.0, 400.0, 400.0) };
         assert_eq!(s, RENDERER_OK);
@@ -1825,7 +2277,17 @@ mod tests {
     fn cmd_v07_transform_chained_operations() {
         // set → fill → reset → fill：验证 transform 作用域正确，reset 后回到 viewport-translate
         let h = make_renderer(800, 600);
-        unsafe { renderer_begin_frame(h, 100.0, 100.0, 600.0, 400.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        unsafe {
+            renderer_begin_frame(
+                h,
+                100.0,
+                100.0,
+                600.0,
+                400.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
 
         // 只平移 50,50
         let m: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 50.0, 50.0];
@@ -1854,7 +2316,9 @@ mod tests {
     fn bitmap_load_from_memory_invalid_bytes_returns_decode_fail() {
         // 喂随机字节，WIC 应识别不出任何容器格式 → DecodeFail。
         let h = make_renderer(640, 480);
-        let garbage: [u8; 16] = [0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let garbage: [u8; 16] = [
+            0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+        ];
         let mut out: u32 = 0xFFFF_FFFF;
         let s = unsafe {
             renderer_load_bitmap_from_memory(h, garbage.as_ptr(), garbage.len() as i32, &mut out)
@@ -1869,20 +2333,15 @@ mod tests {
         let h = make_renderer(320, 240);
         let mut out: u32 = 0;
         // null bytes
-        let s = unsafe {
-            renderer_load_bitmap_from_memory(h, std::ptr::null(), 16, &mut out)
-        };
+        let s = unsafe { renderer_load_bitmap_from_memory(h, std::ptr::null(), 16, &mut out) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
         // 0 len
         let dummy: [u8; 4] = [1, 2, 3, 4];
-        let s = unsafe {
-            renderer_load_bitmap_from_memory(h, dummy.as_ptr(), 0, &mut out)
-        };
+        let s = unsafe { renderer_load_bitmap_from_memory(h, dummy.as_ptr(), 0, &mut out) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
         // null out
-        let s = unsafe {
-            renderer_load_bitmap_from_memory(h, dummy.as_ptr(), 4, std::ptr::null_mut())
-        };
+        let s =
+            unsafe { renderer_load_bitmap_from_memory(h, dummy.as_ptr(), 4, std::ptr::null_mut()) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
         unsafe { renderer_destroy(h) };
     }
@@ -1906,9 +2365,8 @@ mod tests {
         // 0x80 不是合法 UTF-8 起始字节
         let bad: [u8; 4] = [0x80, 0x80, 0x80, 0x80];
         let mut out: u32 = 0;
-        let s = unsafe {
-            renderer_load_bitmap_from_file(h, bad.as_ptr(), bad.len() as i32, &mut out)
-        };
+        let s =
+            unsafe { renderer_load_bitmap_from_file(h, bad.as_ptr(), bad.len() as i32, &mut out) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
         unsafe { renderer_destroy(h) };
     }
@@ -1981,9 +2439,8 @@ mod tests {
 
         let stride: i32 = 4 * 4; // 4 像素 * 4 字节
         let data = vec![0xAAu8; (stride as usize) * 4];
-        let s = unsafe {
-            renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, stride, 0)
-        };
+        let s =
+            unsafe { renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, stride, 0) };
         assert_eq!(s, RENDERER_OK);
 
         unsafe { renderer_destroy_bitmap(h, bm) };
@@ -2014,13 +2471,9 @@ mod tests {
         let mut bm: u32 = 0;
         unsafe { renderer_create_texture(h, 4, 4, 0, &mut bm) };
         let data = [0u8; 64];
-        let s = unsafe {
-            renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, -1, 0)
-        };
+        let s = unsafe { renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, -1, 0) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
-        let s = unsafe {
-            renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, 0, 0)
-        };
+        let s = unsafe { renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, 0, 0) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
         unsafe { renderer_destroy_bitmap(h, bm) };
         unsafe { renderer_destroy(h) };
@@ -2031,9 +2484,7 @@ mod tests {
         let h = make_renderer(320, 240);
         let data = [0u8; 64];
         // handle=0 始终无效；任意 generation=0 也是 ABA 保留值
-        let s = unsafe {
-            renderer_update_texture(h, 0, data.as_ptr(), data.len() as i32, 16, 0)
-        };
+        let s = unsafe { renderer_update_texture(h, 0, data.as_ptr(), data.len() as i32, 16, 0) };
         assert_eq!(s, RENDERER_ERR_RESOURCE_NOT_FOUND);
         unsafe { renderer_destroy(h) };
     }
@@ -2046,9 +2497,7 @@ mod tests {
         let mut bm: u32 = 0;
         unsafe { renderer_create_texture(h, 8, 8, 0, &mut bm) };
         let data = vec![0u8; 16 * 8]; // height * (短)stride
-        let s = unsafe {
-            renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, 16, 0)
-        };
+        let s = unsafe { renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, 16, 0) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
         unsafe { renderer_destroy_bitmap(h, bm) };
         unsafe { renderer_destroy(h) };
@@ -2061,9 +2510,7 @@ mod tests {
         let mut bm: u32 = 0;
         unsafe { renderer_create_texture(h, 4, 4, 0, &mut bm) };
         let data = vec![0u8; 64];
-        let s = unsafe {
-            renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, 16, 99)
-        };
+        let s = unsafe { renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, 16, 99) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
         unsafe { renderer_destroy_bitmap(h, bm) };
         unsafe { renderer_destroy(h) };
@@ -2076,9 +2523,7 @@ mod tests {
         let mut bm: u32 = 0;
         unsafe { renderer_create_texture(h, 4, 4, 0, &mut bm) };
         let data = vec![0u8; 64];
-        let s = unsafe {
-            renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, 16, 2)
-        };
+        let s = unsafe { renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, 16, 2) };
         assert_eq!(s, RENDERER_ERR_UNSUPPORTED_FORMAT);
         unsafe { renderer_destroy_bitmap(h, bm) };
         unsafe { renderer_destroy(h) };
@@ -2092,9 +2537,8 @@ mod tests {
         unsafe { renderer_create_texture(h, 4, 4, 1, &mut bm) }; // format=RGBA8
         let stride: i32 = 4 * 4;
         let data = vec![0xC8u8; (stride as usize) * 4]; // 任意 RGBA 值，关键是不 panic
-        let s = unsafe {
-            renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, stride, 1)
-        };
+        let s =
+            unsafe { renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, stride, 1) };
         assert_eq!(s, RENDERER_OK);
         unsafe { renderer_destroy_bitmap(h, bm) };
         unsafe { renderer_destroy(h) };
@@ -2116,9 +2560,7 @@ mod tests {
         unsafe { renderer_create_texture(h, 16, 16, 0, &mut bm) };
 
         let s = unsafe {
-            renderer_draw_bitmap(
-                h, bm, 0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 16.0, 16.0, 1.0, 1,
-            )
+            renderer_draw_bitmap(h, bm, 0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 16.0, 16.0, 1.0, 1)
         };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
 
@@ -2136,22 +2578,28 @@ mod tests {
         let data = vec![0x80u8; (stride as usize) * 8];
         unsafe { renderer_update_texture(h, bm, data.as_ptr(), data.len() as i32, stride, 0) };
 
-        unsafe { renderer_begin_frame(h, 0.0, 0.0, 320.0, 240.0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        unsafe {
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                320.0,
+                240.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         unsafe { renderer_clear(h, 0.0, 0.0, 0.0, 1.0) };
 
         // 整 bitmap → src_*=0 → 走「整 bitmap」路径
         let s = unsafe {
-            renderer_draw_bitmap(
-                h, bm, 0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 32.0, 32.0, 0.8, 1,
-            )
+            renderer_draw_bitmap(h, bm, 0.0, 0.0, 0.0, 0.0, 10.0, 10.0, 32.0, 32.0, 0.8, 1)
         };
         assert_eq!(s, RENDERER_OK);
 
         // 子 rect + nearest 插值
         let s = unsafe {
-            renderer_draw_bitmap(
-                h, bm, 1.0, 1.0, 4.0, 4.0, 100.0, 100.0, 64.0, 64.0, 1.0, 0,
-            )
+            renderer_draw_bitmap(h, bm, 1.0, 1.0, 4.0, 4.0, 100.0, 100.0, 64.0, 64.0, 1.0, 0)
         };
         assert_eq!(s, RENDERER_OK);
 
@@ -2183,14 +2631,11 @@ mod tests {
         let s = unsafe { renderer_create_texture(std::ptr::null_mut(), 16, 16, 0, &mut out) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
 
-        let s = unsafe {
-            renderer_update_texture(std::ptr::null_mut(), 1, dummy.as_ptr(), 4, 4, 0)
-        };
+        let s =
+            unsafe { renderer_update_texture(std::ptr::null_mut(), 1, dummy.as_ptr(), 4, 4, 0) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
 
-        let s = unsafe {
-            renderer_get_bitmap_size(std::ptr::null_mut(), 1, &mut w, &mut hh)
-        };
+        let s = unsafe { renderer_get_bitmap_size(std::ptr::null_mut(), 1, &mut w, &mut hh) };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
 
         let s = unsafe { renderer_destroy_bitmap(std::ptr::null_mut(), 1) };
@@ -2199,7 +2644,17 @@ mod tests {
         let s = unsafe {
             renderer_draw_bitmap(
                 std::ptr::null_mut(),
-                1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 16.0, 16.0, 1.0, 1,
+                1,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                16.0,
+                16.0,
+                1.0,
+                1,
             )
         };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
@@ -2216,12 +2671,17 @@ mod tests {
     fn capture_open_always_returns_capture_init_in_v07() {
         let h = make_renderer(640, 480);
         let mut out: u32 = 42;
-        let s = unsafe { renderer_capture_open(h, RENDERER_CAPTURE_TARGET_PRIMARY_MONITOR, 0, 0, &mut out) };
+        let s = unsafe {
+            renderer_capture_open(h, RENDERER_CAPTURE_TARGET_PRIMARY_MONITOR, 0, 0, &mut out)
+        };
         assert_eq!(s, RENDERER_ERR_CAPTURE_INIT);
         assert_eq!(out, 0, "out_capture_handle should be cleared on failure");
-        let s = unsafe { renderer_capture_open(h, RENDERER_CAPTURE_TARGET_MONITOR_BY_INDEX, 1, 0, &mut out) };
+        let s = unsafe {
+            renderer_capture_open(h, RENDERER_CAPTURE_TARGET_MONITOR_BY_INDEX, 1, 0, &mut out)
+        };
         assert_eq!(s, RENDERER_ERR_CAPTURE_INIT);
-        let s = unsafe { renderer_capture_open(h, RENDERER_CAPTURE_TARGET_HWND, 0xDEAD, 1, &mut out) };
+        let s =
+            unsafe { renderer_capture_open(h, RENDERER_CAPTURE_TARGET_HWND, 0xDEAD, 1, &mut out) };
         assert_eq!(s, RENDERER_ERR_CAPTURE_INIT);
         unsafe { renderer_destroy(h) };
     }
@@ -2308,11 +2768,18 @@ mod tests {
         let h = make_renderer(640, 480);
         let path = make_simple_triangle_path();
         unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
-        let st = unsafe {
-            renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0)
-        };
+        let st =
+            unsafe { renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0) };
         assert_eq!(st, RENDERER_OK);
         assert_eq!(unsafe { renderer_end_frame(h) }, RENDERER_OK);
         unsafe { renderer_destroy(h) };
@@ -2323,10 +2790,28 @@ mod tests {
         let h = make_renderer(640, 480);
         let path = make_simple_triangle_path();
         unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
         let st = unsafe {
-            renderer_stroke_path(h, path.as_ptr(), path.len() as i32, 2.0, 0.9, 0.5, 0.5, 1.0, 0)
+            renderer_stroke_path(
+                h,
+                path.as_ptr(),
+                path.len() as i32,
+                2.0,
+                0.9,
+                0.5,
+                0.5,
+                1.0,
+                0,
+            )
         };
         assert_eq!(st, RENDERER_OK);
         assert_eq!(unsafe { renderer_end_frame(h) }, RENDERER_OK);
@@ -2339,11 +2824,18 @@ mod tests {
         // 0x06 是 reserved 区间起点（spec §2.3.4 决策 10.1）
         let path: Vec<u8> = vec![0x06, 0, 0, 0, 0, 0, 0, 0, 0];
         unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
-        let st = unsafe {
-            renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0)
-        };
+        let st =
+            unsafe { renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0) };
         assert_eq!(st, RENDERER_ERR_UNSUPPORTED_FORMAT);
         unsafe { renderer_end_frame(h) };
         unsafe { renderer_destroy(h) };
@@ -2355,11 +2847,18 @@ mod tests {
         // MOVE_TO 后只有 4 个字节（不够 8）
         let path: Vec<u8> = vec![0x01, 1, 2, 3, 4];
         unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
-        let st = unsafe {
-            renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0)
-        };
+        let st =
+            unsafe { renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0) };
         assert_eq!(st, RENDERER_ERR_INVALID_PARAM);
         unsafe { renderer_end_frame(h) };
         unsafe { renderer_destroy(h) };
@@ -2370,9 +2869,8 @@ mod tests {
         // 不调 begin_frame 直接 fill_path → cmd_drawing 守卫报 INVALID_PARAM
         let h = make_renderer(640, 480);
         let path = make_simple_triangle_path();
-        let st = unsafe {
-            renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0)
-        };
+        let st =
+            unsafe { renderer_fill_path(h, path.as_ptr(), path.len() as i32, 0.5, 0.5, 0.9, 1.0) };
         assert_eq!(st, RENDERER_ERR_INVALID_PARAM);
         unsafe { renderer_destroy(h) };
     }
@@ -2403,12 +2901,29 @@ mod tests {
             1.0, 0.0, 0.0, 1.0, 1.0,
         ];
         unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
         let st = unsafe {
             renderer_fill_rect_gradient_linear(
-                h, 10.0, 10.0, 200.0, 50.0, 10.0, 10.0, 210.0, 10.0,
-                stops.as_ptr(), 2,
+                h,
+                10.0,
+                10.0,
+                200.0,
+                50.0,
+                10.0,
+                10.0,
+                210.0,
+                10.0,
+                stops.as_ptr(),
+                2,
             )
         };
         assert_eq!(st, RENDERER_OK);
@@ -2420,17 +2935,32 @@ mod tests {
     fn gradient_radial_three_stops_ok() {
         let h = make_renderer(640, 480);
         let stops: Vec<f32> = vec![
-            0.0, 1.0, 0.0, 0.0, 1.0,
-            0.5, 0.0, 1.0, 0.0, 1.0,
-            1.0, 0.0, 0.0, 1.0, 1.0,
+            0.0, 1.0, 0.0, 0.0, 1.0, 0.5, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0,
         ];
         unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
         let st = unsafe {
             renderer_fill_rect_gradient_radial(
-                h, 10.0, 10.0, 100.0, 100.0, 60.0, 60.0, 50.0, 50.0,
-                stops.as_ptr(), 3,
+                h,
+                10.0,
+                10.0,
+                100.0,
+                100.0,
+                60.0,
+                60.0,
+                50.0,
+                50.0,
+                stops.as_ptr(),
+                3,
             )
         };
         assert_eq!(st, RENDERER_OK);
@@ -2443,12 +2973,29 @@ mod tests {
         let h = make_renderer(640, 480);
         let stops: Vec<f32> = vec![0.0, 1.0, 0.0, 0.0, 1.0];
         unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
         let st = unsafe {
             renderer_fill_rect_gradient_linear(
-                h, 0.0, 0.0, 100.0, 100.0, 0.0, 0.0, 100.0, 0.0,
-                stops.as_ptr(), 1,
+                h,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+                0.0,
+                0.0,
+                100.0,
+                0.0,
+                stops.as_ptr(),
+                1,
             )
         };
         // stop_count<2 在 FFI 直接拒
@@ -2461,17 +3008,31 @@ mod tests {
     fn gradient_offset_out_of_range_rejected() {
         let h = make_renderer(640, 480);
         // offset 1.5 越界
-        let stops: Vec<f32> = vec![
-            0.0, 1.0, 0.0, 0.0, 1.0,
-            1.5, 0.0, 0.0, 1.0, 1.0,
-        ];
+        let stops: Vec<f32> = vec![0.0, 1.0, 0.0, 0.0, 1.0, 1.5, 0.0, 0.0, 1.0, 1.0];
         unsafe {
-            renderer_begin_frame(h, 0.0, 0.0, 640.0, 480.0, std::ptr::null_mut(), std::ptr::null_mut())
+            renderer_begin_frame(
+                h,
+                0.0,
+                0.0,
+                640.0,
+                480.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
         let st = unsafe {
             renderer_fill_rect_gradient_linear(
-                h, 0.0, 0.0, 100.0, 100.0, 0.0, 0.0, 100.0, 0.0,
-                stops.as_ptr(), 2,
+                h,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+                0.0,
+                0.0,
+                100.0,
+                0.0,
+                stops.as_ptr(),
+                2,
             )
         };
         assert_eq!(st, RENDERER_ERR_INVALID_PARAM);
@@ -2485,8 +3046,16 @@ mod tests {
         let st = unsafe {
             renderer_fill_rect_gradient_linear(
                 std::ptr::null_mut(),
-                0.0, 0.0, 100.0, 100.0, 0.0, 0.0, 100.0, 0.0,
-                stops.as_ptr(), 2,
+                0.0,
+                0.0,
+                100.0,
+                100.0,
+                0.0,
+                0.0,
+                100.0,
+                0.0,
+                stops.as_ptr(),
+                2,
             )
         };
         assert_eq!(st, RENDERER_ERR_INVALID_PARAM);
@@ -2503,7 +3072,12 @@ mod tests {
         let path = b"foo.mp4";
         let mut out: u32 = 0;
         let s = unsafe {
-            renderer_video_open_file(std::ptr::null_mut(), path.as_ptr(), path.len() as i32, &mut out)
+            renderer_video_open_file(
+                std::ptr::null_mut(),
+                path.as_ptr(),
+                path.len() as i32,
+                &mut out,
+            )
         };
         assert_eq!(s, RENDERER_ERR_INVALID_PARAM);
     }
@@ -2545,9 +3119,7 @@ mod tests {
         let h = make_renderer(320, 240);
         let path = b"Z:\\nonexistent\\not_a_real_video.mp4";
         let mut out: u32 = 0;
-        let s = unsafe {
-            renderer_video_open_file(h, path.as_ptr(), path.len() as i32, &mut out)
-        };
+        let s = unsafe { renderer_video_open_file(h, path.as_ptr(), path.len() as i32, &mut out) };
         assert_eq!(s, RENDERER_ERR_VIDEO_OPEN_FAIL);
         assert_eq!(out, 0, "handle should stay 0 on failure");
         unsafe { renderer_destroy(h) };
@@ -2583,7 +3155,7 @@ mod tests {
     #[test]
     fn video_present_frame_on_invalid_handle_returns_not_found() {
         let h = make_renderer(320, 240);
-        let mut bm: u32 = 42;  // 预置非零让测试能检 out_bitmap 是否被清零
+        let mut bm: u32 = 42; // 预置非零让测试能检 out_bitmap 是否被清零
         let mut eof: i32 = -1;
         let s = unsafe { renderer_video_present_frame(h, 0xCAFEBABE, &mut bm, &mut eof) };
         assert_eq!(s, RENDERER_ERR_VIDEO_NOT_FOUND);

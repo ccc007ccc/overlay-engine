@@ -15,7 +15,7 @@
 //!
 //! `Vec<Option<Slot<T>>>` 看起来够，但 `Option::None` 不带 generation —— 我们需要
 //! slot 被释放后**记住**它的 generation 才能在重新分配时 +1。所以 slot 内部用
-//! `enum SlotState { Empty { gen }, Used { gen, value } }`。
+//! `enum SlotState { Empty { gen }, Retired, Used { gen, value } }`。
 //!
 //! ## 不在范围
 //!
@@ -47,19 +47,11 @@ fn make_handle(index: u16, generation: u16) -> BitmapHandle {
     ((generation as u32) << 16) | (index as u32)
 }
 
-/// Slot 状态：空（带 generation 给重用 +1）或占用（带 generation 配 value）。
+/// Slot 状态：空（带 generation 给重用 +1）、退休或占用（带 generation 配 value）。
 enum SlotState<T> {
     Empty { generation: u16 },
+    Retired,
     Used { generation: u16, value: T },
-}
-
-impl<T> SlotState<T> {
-    fn generation(&self) -> u16 {
-        match self {
-            Self::Empty { generation } => *generation,
-            Self::Used { generation, .. } => *generation,
-        }
-    }
 }
 
 /// 通用 slot table。Phase 2 的 BitmapResource 是首个实例；
@@ -90,10 +82,11 @@ impl<T> ResourceTable<T> {
     /// 满 → `ResourceLimit`。
     pub(crate) fn insert(&mut self, value: T) -> RendererResult<BitmapHandle> {
         // 1) 优先复用 free_list
-        if let Some(idx) = self.free_list.pop() {
+        while let Some(idx) = self.free_list.pop() {
             let slot = &mut self.slots[idx as usize];
             let new_gen = match slot {
                 SlotState::Empty { generation } => *generation,
+                SlotState::Retired => continue,
                 SlotState::Used { .. } => {
                     // 防御：free_list 里的 slot 必须是 Empty。bug 走到这里数据已乱。
                     debug_assert!(false, "free_list contained a Used slot");
@@ -114,7 +107,13 @@ impl<T> ResourceTable<T> {
         let idx = self.next_fresh;
         self.next_fresh += 1;
         // 初始 generation = 1（new() 设的）—— 直接换 Used 保留同 generation。
-        let gen_ = self.slots[idx as usize].generation();
+        let gen_ = match &self.slots[idx as usize] {
+            SlotState::Empty { generation } => *generation,
+            SlotState::Retired | SlotState::Used { .. } => {
+                debug_assert!(false, "next_fresh pointed at a non-empty slot");
+                return Err(RendererError::ResourceLimit);
+            }
+        };
         self.slots[idx as usize] = SlotState::Used {
             generation: gen_,
             value,
@@ -159,7 +158,7 @@ impl<T> ResourceTable<T> {
     }
 
     /// 按 handle 释放。已释放或失效视为 `ResourceNotFound`。
-    /// 释放后 slot 进 free_list，generation +1（防 ABA）。
+    /// 释放后 slot 未达 generation 上限则进 free_list；达到上限则退休（防 ABA）。
     pub(crate) fn remove(&mut self, h: BitmapHandle) -> RendererResult<T> {
         if h == 0 {
             return Err(RendererError::ResourceNotFound);
@@ -172,19 +171,19 @@ impl<T> ResourceTable<T> {
         match slot {
             SlotState::Used { generation, .. } if *generation == gen_ => {
                 // 不能直接 take —— SlotState::Used 不是 Option。先 swap 出去。
-                let taken =
-                    std::mem::replace(slot, SlotState::Empty { generation: 0 });
+                let taken = std::mem::replace(slot, SlotState::Empty { generation: 0 });
                 let (taken_gen, value) = match taken {
                     SlotState::Used { generation, value } => (generation, value),
                     _ => unreachable!(),
                 };
-                // generation +1 防 ABA；wrapping 处理（65535 后回 0，但 0 generation
-                // 配 idx > 0 仍然合法 —— handle 整体 ≠ 0 即可）。
-                let next_gen = taken_gen.wrapping_add(1);
-                *slot = SlotState::Empty {
-                    generation: if next_gen == 0 { 1 } else { next_gen },
-                };
-                self.free_list.push(idx);
+                if taken_gen == u16::MAX {
+                    *slot = SlotState::Retired;
+                } else {
+                    *slot = SlotState::Empty {
+                        generation: taken_gen + 1,
+                    };
+                    self.free_list.push(idx);
+                }
                 Ok(value)
             }
             _ => Err(RendererError::ResourceNotFound),
@@ -215,10 +214,7 @@ mod tests {
         assert_eq!(*t.get(h).unwrap(), 42);
         let v = t.remove(h).unwrap();
         assert_eq!(v, 42);
-        assert!(matches!(
-            t.get(h),
-            Err(RendererError::ResourceNotFound)
-        ));
+        assert!(matches!(t.get(h), Err(RendererError::ResourceNotFound)));
     }
 
     #[test]
@@ -230,10 +226,7 @@ mod tests {
         let h2 = t.insert(2).unwrap();
         assert_ne!(h1, h2, "ABA: reused slot must produce different handle");
         // 老句柄查询应失败
-        assert!(matches!(
-            t.get(h1),
-            Err(RendererError::ResourceNotFound)
-        ));
+        assert!(matches!(t.get(h1), Err(RendererError::ResourceNotFound)));
         // 新句柄查询应成功
         assert_eq!(*t.get(h2).unwrap(), 2);
     }
@@ -254,10 +247,7 @@ mod tests {
             assert_ne!(h, 0);
         }
         // 第 1025 个应失败
-        assert!(matches!(
-            t.insert(9999),
-            Err(RendererError::ResourceLimit)
-        ));
+        assert!(matches!(t.insert(9999), Err(RendererError::ResourceLimit)));
         assert_eq!(t.allocated_count(), BITMAP_SLOT_CAPACITY);
     }
 
@@ -281,9 +271,29 @@ mod tests {
         let mut t: ResourceTable<i32> = ResourceTable::new();
         let h = t.insert(1).unwrap();
         assert_eq!(t.remove(h).unwrap(), 1);
+        assert!(matches!(t.remove(h), Err(RendererError::ResourceNotFound)));
+    }
+
+    #[test]
+    fn max_generation_slot_is_retired_instead_of_wrapping() {
+        let mut t: ResourceTable<i32> = ResourceTable::new();
+        t.slots[0] = SlotState::Used {
+            generation: u16::MAX,
+            value: 7,
+        };
+        t.next_fresh = 1;
+
+        let old_handle = make_handle(0, u16::MAX);
+        assert_eq!(t.remove(old_handle).unwrap(), 7);
         assert!(matches!(
-            t.remove(h),
+            t.get(old_handle),
             Err(RendererError::ResourceNotFound)
         ));
+
+        let new_handle = t.insert(8).unwrap();
+        let (new_index, new_generation) = split_handle(new_handle);
+        assert_eq!(new_index, 1);
+        assert_eq!(new_generation, 1);
+        assert_eq!(*t.get(new_handle).unwrap(), 8);
     }
 }

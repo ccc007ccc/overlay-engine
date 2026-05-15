@@ -17,8 +17,9 @@
 *.user
 *.suo
 
-# 自签证书私钥（dev 用，CI 上需用 actions secret 注入）
+# 自签证书（dev 用，CI 上需用 actions secret 注入私钥）
 *.pfx
+*.cer
 
 # 编译产物
 *.pdb
@@ -26,6 +27,10 @@
 *.exe
 *.msix
 *.appx
+/dist/
+
+# Claude 本地状态
+/.claude/plan/
 
 # 临时
 *.tmp

@@ -179,7 +179,9 @@ impl Renderer {
         font_size: f32,
         color: [f32; 4],
     ) -> RendererResult<()> {
-        self.inner.lock().cmd_draw_text(text, x, y, font_size, color)
+        self.inner
+            .lock()
+            .cmd_draw_text(text, x, y, font_size, color)
     }
 
     // ===== v0.7 矢量图元（薄转发到 RendererState） =====
@@ -254,9 +256,16 @@ impl Renderer {
         stroke_width: f32,
         color: [f32; 4],
     ) -> RendererResult<()> {
-        self.inner
-            .lock()
-            .cmd_stroke_rounded_rect(x, y, w, h, radius_x, radius_y, stroke_width, color)
+        self.inner.lock().cmd_stroke_rounded_rect(
+            x,
+            y,
+            w,
+            h,
+            radius_x,
+            radius_y,
+            stroke_width,
+            color,
+        )
     }
 
     pub(crate) fn cmd_fill_ellipse(
@@ -284,13 +293,7 @@ impl Renderer {
             .cmd_stroke_ellipse(cx, cy, rx, ry, stroke_width, color)
     }
 
-    pub(crate) fn cmd_push_clip_rect(
-        &self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    ) -> RendererResult<()> {
+    pub(crate) fn cmd_push_clip_rect(&self, x: f32, y: f32, w: f32, h: f32) -> RendererResult<()> {
         self.inner.lock().cmd_push_clip_rect(x, y, w, h)
     }
 
@@ -364,7 +367,17 @@ impl Renderer {
         interp_mode: i32,
     ) -> RendererResult<()> {
         self.inner.lock().cmd_draw_bitmap(
-            bitmap, src_x, src_y, src_w, src_h, dst_x, dst_y, dst_w, dst_h, opacity, interp_mode,
+            bitmap,
+            src_x,
+            src_y,
+            src_w,
+            src_h,
+            dst_x,
+            dst_y,
+            dst_w,
+            dst_h,
+            opacity,
+            interp_mode,
         )
     }
 

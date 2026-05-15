@@ -227,7 +227,7 @@ fn replay_and_check_monitor_local_visibility(
             // are not produced by `build_monitor_local_stream`, so they do
             // not affect this sub-property's outcome. Matching them
             // explicitly as no-ops keeps the replay total.
-            RenderCommand::Clear(_) | RenderCommand::Draw(_) => {}
+            RenderCommand::Clear(_) | RenderCommand::Draw(_) | RenderCommand::DrawBitmap(_) => {}
         }
     }
 
@@ -443,7 +443,12 @@ fn consumer_strategy(id: u32) -> impl Strategy<Value = StubConsumer> {
     //   consumer_client_origin_on_screen(consumer) != (input.x, input.y)
     // Range chosen to be clearly not equal to (10,10) and reasonable for a
     // desktop: x ∈ [100, 2000], y ∈ [100, 1200].
-    (100i32..=2000i32, 100i32..=1200i32, 400u32..=1920u32, 300u32..=1080u32)
+    (
+        100i32..=2000i32,
+        100i32..=1200i32,
+        400u32..=1920u32,
+        300u32..=1080u32,
+    )
         .prop_map(move |(x, y, w, h)| StubConsumer {
             id,
             screen_origin_x: x,
@@ -552,5 +557,6 @@ proptest! {
 }
 
 fn has_fill_rect(cmds: &[RenderCommand]) -> bool {
-    cmds.iter().any(|c| matches!(c, RenderCommand::Draw(DrawCmd::FillRect { .. })))
+    cmds.iter()
+        .any(|c| matches!(c, RenderCommand::Draw(DrawCmd::FillRect { .. })))
 }

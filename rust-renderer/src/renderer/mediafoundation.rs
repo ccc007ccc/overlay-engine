@@ -26,21 +26,23 @@
 
 use std::sync::OnceLock;
 
-use windows::core::PCWSTR;
+use windows::core::{Interface, PCWSTR};
 use windows::Win32::Media::MediaFoundation::{
-    IMFAttributes, IMFMediaBuffer, IMFMediaType, IMFSample, IMFSourceReader, MFCreateAttributes,
-    MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video, MFStartup,
-    MFVideoFormat_RGB32, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-    MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+    IMF2DBuffer, IMFAttributes, IMFMediaBuffer, IMFMediaType, IMFSample, IMFSourceReader,
+    MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video,
+    MFStartup, MFVideoFormat_RGB32, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
+    MF_MT_SUBTYPE, MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+    MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
     MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
-    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM,
-    MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_VERSION,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Variant::VT_UI8;
 
 use crate::error::{RendererError, RendererResult};
 use crate::renderer::resources::BitmapHandle;
+
+const MAX_VIDEO_DIMENSION: u32 = 16_384;
 
 /// 视频元数据（spec §4.1 VideoInfo C struct 对应字段）
 #[derive(Clone, Copy, Debug)]
@@ -177,6 +179,7 @@ impl VideoSource {
                 .GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
                 .map_err(RendererError::VideoOpenFail)?
         };
+        ensure_rgb32_subtype(&cur_type)?;
         let (width, height) = read_frame_size(&cur_type)?;
         let (fps_num, fps_den) = read_frame_rate(&cur_type).unwrap_or((30, 1));
 
@@ -210,6 +213,12 @@ impl VideoSource {
 
     /// 跳到指定毫秒位置。EOS flag 也清掉（重新开始读）。
     pub(crate) fn seek(&mut self, time_ms: u64) -> RendererResult<()> {
+        if self.info.duration_ms > 0 && time_ms > self.info.duration_ms {
+            return Err(RendererError::VideoSeekFail(windows::core::Error::new(
+                windows::core::HRESULT(0x80070057u32 as i32),
+                "seek position exceeds video duration",
+            )));
+        }
         let ticks = ms_to_ticks_100ns(time_ms);
         let var = make_propvariant_u8(ticks as u64);
         // GUID_NULL = 默认时间格式（100ns ticks，参考 MSDN MF_REFERENCE_TIME）
@@ -252,9 +261,7 @@ impl VideoSource {
                     Some(&mut timestamp as *mut i64),
                     Some(&mut sample as *mut Option<IMFSample>),
                 )
-                .map_err(|e| {
-                    RendererError::VideoDecodeFail(format!("ReadSample failed: {e}"))
-                })?;
+                .map_err(|e| RendererError::VideoDecodeFail(format!("ReadSample failed: {e}")))?;
         }
 
         // EOS：sample 可能为 None，flags 含 ENDOFSTREAM
@@ -278,15 +285,47 @@ impl VideoSource {
 
         self.last_pts_100ns = timestamp;
 
-        // sample → contiguous IMFMediaBuffer
         let buffer: IMFMediaBuffer = unsafe {
-            sample
-                .ConvertToContiguousBuffer()
-                .map_err(|e| RendererError::VideoDecodeFail(format!("ConvertToContiguousBuffer: {e}")))?
+            sample.ConvertToContiguousBuffer().map_err(|e| {
+                RendererError::VideoDecodeFail(format!("ConvertToContiguousBuffer: {e}"))
+            })?
         };
 
-        // Lock → memcpy → Unlock。
-        // RGB32 packed: pcb_max_len ≥ width × height × 4，stride = width × 4。
+        if let Ok(buffer2d) = buffer.cast::<IMF2DBuffer>() {
+            let mut data: *mut u8 = std::ptr::null_mut();
+            let mut pitch: i32 = 0;
+            unsafe {
+                buffer2d
+                    .Lock2D(&mut data, &mut pitch)
+                    .map_err(|e| RendererError::VideoDecodeFail(format!("buffer Lock2D: {e}")))?;
+            }
+            let res = (|| -> RendererResult<()> {
+                if data.is_null() || pitch <= 0 {
+                    return Err(RendererError::VideoDecodeFail(format!(
+                        "MF 2D buffer returned invalid pitch {}",
+                        pitch
+                    )));
+                }
+                let src_len =
+                    source_len_for_stride(pitch as usize, self.info.width, self.info.height)?;
+                let src = unsafe { std::slice::from_raw_parts(data, src_len) };
+                copy_bgra_rows_force_opaque_alpha(
+                    src,
+                    pitch as usize,
+                    self.info.width,
+                    self.info.height,
+                    &mut self.staging,
+                )
+            })();
+            unsafe { buffer2d.Unlock2D().ok() };
+            res?;
+            return Ok((
+                &self.staging,
+                bgra_row_bytes(self.info.width)? as i32,
+                self.eof,
+            ));
+        }
+
         let mut data: *mut u8 = std::ptr::null_mut();
         let mut max_len: u32 = 0;
         let mut cur_len: u32 = 0;
@@ -296,25 +335,29 @@ impl VideoSource {
                 .map_err(|e| RendererError::VideoDecodeFail(format!("buffer Lock: {e}")))?;
         }
         let res = (|| -> RendererResult<()> {
-            let expected = self.staging.len();
-            let cur = cur_len as usize;
-            if cur < expected {
-                return Err(RendererError::VideoDecodeFail(format!(
-                    "MF buffer too small: {} < {} (expected width*height*4)",
-                    cur, expected
-                )));
+            if data.is_null() {
+                return Err(RendererError::VideoDecodeFail(
+                    "MF buffer returned null data".to_string(),
+                ));
             }
-            // packed RGB32（width × 4），直接 memcpy 前 expected 字节。
-            // 多余的 padding 我们忽略（下游 update_texture 用 stride=width*4 解读）。
-            unsafe {
-                std::ptr::copy_nonoverlapping(data, self.staging.as_mut_ptr(), expected);
-            }
-            Ok(())
+            let src = unsafe { std::slice::from_raw_parts(data, cur_len as usize) };
+            let row_bytes = bgra_row_bytes(self.info.width)?;
+            copy_bgra_rows_force_opaque_alpha(
+                src,
+                row_bytes,
+                self.info.width,
+                self.info.height,
+                &mut self.staging,
+            )
         })();
         unsafe { buffer.Unlock().ok() };
         res?;
 
-        Ok((&self.staging, (self.info.width * 4) as i32, self.eof))
+        Ok((
+            &self.staging,
+            bgra_row_bytes(self.info.width)? as i32,
+            self.eof,
+        ))
     }
 }
 
@@ -328,6 +371,86 @@ impl Drop for VideoSource {
 
 // -------------------- helpers --------------------
 
+fn ensure_rgb32_subtype(mt: &IMFMediaType) -> RendererResult<()> {
+    let subtype = unsafe {
+        mt.GetGUID(&MF_MT_SUBTYPE)
+            .map_err(RendererError::VideoOpenFail)?
+    };
+    if subtype == MFVideoFormat_RGB32 {
+        Ok(())
+    } else {
+        Err(RendererError::VideoOpenFail(windows::core::Error::new(
+            windows::core::HRESULT(0x80004005u32 as i32),
+            "MF did not keep RGB32 output subtype",
+        )))
+    }
+}
+
+fn bgra_row_bytes(width: u32) -> RendererResult<usize> {
+    (width as usize)
+        .checked_mul(4)
+        .ok_or_else(|| RendererError::VideoDecodeFail("video row byte count overflow".to_string()))
+}
+
+fn source_len_for_stride(stride: usize, width: u32, height: u32) -> RendererResult<usize> {
+    let row_bytes = bgra_row_bytes(width)?;
+    if stride < row_bytes {
+        return Err(RendererError::VideoDecodeFail(format!(
+            "MF stride too small: {} < {}",
+            stride, row_bytes
+        )));
+    }
+    if height == 0 {
+        return Ok(0);
+    }
+    stride
+        .checked_mul(height.saturating_sub(1) as usize)
+        .and_then(|n| n.checked_add(row_bytes))
+        .ok_or_else(|| {
+            RendererError::VideoDecodeFail("video source byte count overflow".to_string())
+        })
+}
+
+fn copy_bgra_rows_force_opaque_alpha(
+    src: &[u8],
+    src_stride: usize,
+    width: u32,
+    height: u32,
+    dst: &mut [u8],
+) -> RendererResult<()> {
+    let row_bytes = bgra_row_bytes(width)?;
+    let expected_dst = row_bytes.checked_mul(height as usize).ok_or_else(|| {
+        RendererError::VideoDecodeFail("video staging byte count overflow".to_string())
+    })?;
+    if dst.len() < expected_dst {
+        return Err(RendererError::VideoDecodeFail(format!(
+            "video staging buffer too small: {} < {}",
+            dst.len(),
+            expected_dst
+        )));
+    }
+    let expected_src = source_len_for_stride(src_stride, width, height)?;
+    if src.len() < expected_src {
+        return Err(RendererError::VideoDecodeFail(format!(
+            "MF buffer too small: {} < {}",
+            src.len(),
+            expected_src
+        )));
+    }
+
+    for y in 0..height as usize {
+        let src_start = y * src_stride;
+        let dst_start = y * row_bytes;
+        let src_row = &src[src_start..src_start + row_bytes];
+        let dst_row = &mut dst[dst_start..dst_start + row_bytes];
+        dst_row.copy_from_slice(src_row);
+        for px in dst_row.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+    }
+    Ok(())
+}
+
 fn read_frame_size(mt: &IMFMediaType) -> RendererResult<(u32, u32)> {
     let packed = unsafe {
         mt.GetUINT64(&MF_MT_FRAME_SIZE)
@@ -340,6 +463,12 @@ fn read_frame_size(mt: &IMFMediaType) -> RendererResult<(u32, u32)> {
         return Err(RendererError::VideoOpenFail(windows::core::Error::new(
             windows::core::HRESULT(0x80004005u32 as i32),
             "MF reported zero frame size",
+        )));
+    }
+    if width > MAX_VIDEO_DIMENSION || height > MAX_VIDEO_DIMENSION {
+        return Err(RendererError::VideoOpenFail(windows::core::Error::new(
+            windows::core::HRESULT(0x80070057u32 as i32),
+            "MF reported oversized frame size",
         )));
     }
     Ok((width, height))
@@ -397,6 +526,35 @@ mod tests {
         assert_eq!(ms_to_ticks_100ns(0), 0);
         assert_eq!(ms_to_ticks_100ns(1), 10_000);
         assert_eq!(ms_to_ticks_100ns(1_000), 10_000_000);
+    }
+
+    #[test]
+    fn copy_bgra_rows_handles_packed_source_and_forces_alpha() {
+        let src = [10u8, 20, 30, 0, 40, 50, 60, 7];
+        let mut dst = [0u8; 8];
+        copy_bgra_rows_force_opaque_alpha(&src, 8, 2, 1, &mut dst).unwrap();
+        assert_eq!(dst, [10, 20, 30, 255, 40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn copy_bgra_rows_handles_padded_stride() {
+        let src = [1u8, 2, 3, 4, 0xEE, 0xEE, 5, 6, 7, 8, 0xEE, 0xEE];
+        let mut dst = [0u8; 8];
+        copy_bgra_rows_force_opaque_alpha(&src, 6, 1, 2, &mut dst).unwrap();
+        assert_eq!(dst, [1, 2, 3, 255, 5, 6, 7, 255]);
+    }
+
+    #[test]
+    fn copy_bgra_rows_rejects_stride_below_row_bytes() {
+        let src = [0u8; 8];
+        let mut dst = [0u8; 8];
+        let err = copy_bgra_rows_force_opaque_alpha(&src, 4, 2, 1, &mut dst).unwrap_err();
+        assert!(matches!(err, RendererError::VideoDecodeFail(_)));
+    }
+
+    #[test]
+    fn source_len_for_stride_checks_last_row_without_full_padding() {
+        assert_eq!(source_len_for_stride(8, 1, 3).unwrap(), 20);
     }
 
     #[test]

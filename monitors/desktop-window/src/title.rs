@@ -48,10 +48,16 @@ pub enum AttachState {
 pub fn format_window_title(state: AttachState) -> String {
     match state {
         AttachState::Connecting => "Desktop Monitor - connecting...".to_string(),
-        AttachState::Attached { canvas_id, ml: false } => {
+        AttachState::Attached {
+            canvas_id,
+            ml: false,
+        } => {
             format!("Desktop Monitor - canvas {canvas_id} (world only)")
         }
-        AttachState::Attached { canvas_id, ml: true } => {
+        AttachState::Attached {
+            canvas_id,
+            ml: true,
+        } => {
             format!("Desktop Monitor - canvas {canvas_id} (world + monitor_local)")
         }
         AttachState::Reconnecting => "Desktop Monitor - reconnecting...".to_string(),
@@ -80,7 +86,10 @@ mod tests {
     #[test]
     fn attached_world_only_contains_canvas_id_and_world_only_marker() {
         assert_eq!(
-            format_window_title(AttachState::Attached { canvas_id: 7, ml: false }),
+            format_window_title(AttachState::Attached {
+                canvas_id: 7,
+                ml: false
+            }),
             "Desktop Monitor - canvas 7 (world only)"
         );
     }
@@ -88,7 +97,10 @@ mod tests {
     #[test]
     fn attached_dual_visual_contains_canvas_id_and_both_space_markers() {
         assert_eq!(
-            format_window_title(AttachState::Attached { canvas_id: 42, ml: true }),
+            format_window_title(AttachState::Attached {
+                canvas_id: 42,
+                ml: true
+            }),
             "Desktop Monitor - canvas 42 (world + monitor_local)"
         );
     }
@@ -107,8 +119,14 @@ mod tests {
     fn every_variant_keeps_the_desktop_monitor_prefix() {
         let cases = [
             AttachState::Connecting,
-            AttachState::Attached { canvas_id: 0, ml: false },
-            AttachState::Attached { canvas_id: 1, ml: true },
+            AttachState::Attached {
+                canvas_id: 0,
+                ml: false,
+            },
+            AttachState::Attached {
+                canvas_id: 1,
+                ml: true,
+            },
             AttachState::Reconnecting,
         ];
         for state in cases {
@@ -143,12 +161,14 @@ mod tests {
 
     #[test]
     fn dual_visual_marker_only_appears_when_ml_is_true() {
-        let world_only = format_window_title(
-            AttachState::Attached { canvas_id: 1, ml: false },
-        );
-        let dual_visual = format_window_title(
-            AttachState::Attached { canvas_id: 1, ml: true },
-        );
+        let world_only = format_window_title(AttachState::Attached {
+            canvas_id: 1,
+            ml: false,
+        });
+        let dual_visual = format_window_title(AttachState::Attached {
+            canvas_id: 1,
+            ml: true,
+        });
 
         assert!(!world_only.contains("monitor_local"));
         assert!(dual_visual.contains("monitor_local"));

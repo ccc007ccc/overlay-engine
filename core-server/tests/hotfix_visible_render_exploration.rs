@@ -101,8 +101,7 @@ fn read_text(rel: &str) -> String {
     for seg in rel.split('/') {
         p.push(seg);
     }
-    fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("failed to read {:?}: {e}", p))
+    fs::read_to_string(&p).unwrap_or_else(|e| panic!("failed to read {:?}: {e}", p))
 }
 
 fn file_exists(rel: &str) -> bool {
@@ -184,8 +183,7 @@ fn prop_1a_isbugcondition_doc_desktop_window_monitor_bin_resolves() {
     let monitor_bin_path = cargo_toml_bin_path(cargo_toml_rel, "desktop-window-monitor");
     let bin_exists_monitor = monitor_bin_path.is_some();
     let bin_path_is_monitor_rs = monitor_bin_path.as_deref() == Some("src/bin/monitor.rs");
-    let bin_exists_consumer =
-        cargo_toml_has_bin_name(cargo_toml_rel, "desktop-window-consumer");
+    let bin_exists_consumer = cargo_toml_has_bin_name(cargo_toml_rel, "desktop-window-consumer");
 
     let md = read_text(md_rel);
     // Both variants the old doc/binary might reference.
@@ -382,8 +380,7 @@ fn prop_1c_isbugcondition_rename_demo_app_bin_exists() {
     let app_rs_exists = file_exists("core-server/src/bin/demo-app.rs");
     let core_cargo_has_demo_producer =
         cargo_toml_has_bin_name("core-server/Cargo.toml", "demo-producer");
-    let core_cargo_has_demo_app =
-        cargo_toml_has_bin_name("core-server/Cargo.toml", "demo-app");
+    let core_cargo_has_demo_app = cargo_toml_has_bin_name("core-server/Cargo.toml", "demo-app");
 
     // Correct (post-fix) predicate:
     //   * `demo-app.rs` exists at the new path, AND

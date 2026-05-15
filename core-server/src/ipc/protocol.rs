@@ -83,6 +83,20 @@ pub const OP_SUBMIT_FRAME: u16 = 0x0006;
 /// `decode` unknown-opcode downgrade (warn, not error).
 pub const OP_MONITOR_LOCAL_SURFACE_ATTACHED: u16 = 0x0007;
 pub const OP_APP_DETACHED: u16 = 0x0008;
+pub const OP_LOAD_BITMAP: u16 = 0x0009;
+
+fn expected_payload_len(opcode: u16) -> Option<usize> {
+    match opcode {
+        OP_REGISTER_APP | OP_REGISTER_MONITOR => Some(4),
+        OP_CREATE_CANVAS => Some(16),
+        OP_ATTACH_MONITOR => Some(8),
+        OP_CANVAS_ATTACHED => Some(28),
+        OP_SUBMIT_FRAME => Some(20),
+        OP_MONITOR_LOCAL_SURFACE_ATTACHED => Some(24),
+        OP_APP_DETACHED => Some(5),
+        _ => None,
+    }
+}
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,11 +106,14 @@ pub enum AppDetachReason {
     Other = 2,
 }
 
-
 #[derive(Debug, Clone)]
 pub enum ControlMessage {
-    RegisterApp { pid: u32 },
-    RegisterMonitor { pid: u32 },
+    RegisterApp {
+        pid: u32,
+    },
+    RegisterMonitor {
+        pid: u32,
+    },
     CreateCanvas {
         logical_w: u32,
         logical_h: u32,
@@ -142,6 +159,10 @@ pub enum ControlMessage {
         app_id: u32,
         reason: u8,
     },
+    LoadBitmap {
+        bitmap_id: u32,
+        bytes: Vec<u8>,
+    },
 }
 
 impl ControlMessage {
@@ -155,6 +176,7 @@ impl ControlMessage {
             Self::SubmitFrame { .. } => OP_SUBMIT_FRAME,
             Self::MonitorLocalSurfaceAttached { .. } => OP_MONITOR_LOCAL_SURFACE_ATTACHED,
             Self::AppDetached { .. } => OP_APP_DETACHED,
+            Self::LoadBitmap { .. } => OP_LOAD_BITMAP,
         }
     }
 
@@ -265,6 +287,16 @@ impl ControlMessage {
                 buf.put_u32_le(*app_id);
                 buf.put_u8(*reason);
             }
+            Self::LoadBitmap { bitmap_id, bytes } => {
+                let header = MessageHeader {
+                    opcode: self.opcode(),
+                    payload_len: 8 + bytes.len() as u32,
+                };
+                header.encode(buf);
+                buf.put_u32_le(*bitmap_id);
+                buf.put_u32_le(bytes.len() as u32);
+                buf.put_slice(bytes);
+            }
         }
     }
 
@@ -288,6 +320,24 @@ impl ControlMessage {
         payload_len: u32,
         buf: &mut BytesMut,
     ) -> Result<Option<Self>, ProtocolError> {
+        let payload_len = payload_len as usize;
+        if let Some(expected) = expected_payload_len(opcode) {
+            if payload_len != expected {
+                return Err(ProtocolError::PayloadLengthMismatch);
+            }
+            if buf.remaining() < expected {
+                return Err(ProtocolError::BufferTooSmall {
+                    expected,
+                    actual: buf.remaining(),
+                });
+            }
+        } else if buf.remaining() < payload_len {
+            return Err(ProtocolError::BufferTooSmall {
+                expected: payload_len,
+                actual: buf.remaining(),
+            });
+        }
+
         match opcode {
             OP_REGISTER_APP => {
                 if buf.remaining() < 4 {
@@ -394,20 +444,146 @@ impl ControlMessage {
                     reason: buf.get_u8(),
                 }))
             }
+            OP_LOAD_BITMAP => {
+                if payload_len < 8 || buf.remaining() < payload_len {
+                    return Err(ProtocolError::BufferTooSmall {
+                        expected: payload_len.max(8),
+                        actual: buf.remaining(),
+                    });
+                }
+                let bitmap_id = buf.get_u32_le();
+                let byte_len = buf.get_u32_le() as usize;
+                if byte_len != payload_len - 8 {
+                    return Err(ProtocolError::PayloadLengthMismatch);
+                }
+                let bytes = buf.copy_to_bytes(byte_len).to_vec();
+                Ok(Some(Self::LoadBitmap { bitmap_id, bytes }))
+            }
             _ => {
                 // Task 3.3: downgrade unknown opcodes from error to warning.
                 // We must consume the advertised payload so the reader stays
                 // frame-aligned (next call to `MessageHeader::decode` begins
                 // on the next message boundary).
-                let skip = (payload_len as usize).min(buf.remaining());
-                buf.advance(skip);
+                buf.advance(payload_len);
                 eprintln!(
                     "[protocol] unknown opcode {:#06x} — skipping {} payload \
                      bytes (task 3.3 backward-compat downgrade)",
-                    opcode, skip
+                    opcode, payload_len
                 );
                 Ok(None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn known_payload_samples() -> Vec<(u16, Vec<u8>)> {
+        let samples = [
+            ControlMessage::RegisterApp { pid: 1 },
+            ControlMessage::RegisterMonitor { pid: 2 },
+            ControlMessage::CreateCanvas {
+                logical_w: 800,
+                logical_h: 600,
+                render_w: 800,
+                render_h: 600,
+            },
+            ControlMessage::AttachMonitor {
+                canvas_id: 3,
+                monitor_id: 4,
+            },
+            ControlMessage::CanvasAttached {
+                canvas_id: 5,
+                surface_handle: 0x1234,
+                logical_w: 1024,
+                logical_h: 768,
+                render_w: 1024,
+                render_h: 768,
+            },
+            ControlMessage::SubmitFrame {
+                canvas_id: 6,
+                frame_id: 7,
+                offset: 24,
+                length: 128,
+            },
+            ControlMessage::MonitorLocalSurfaceAttached {
+                canvas_id: 8,
+                monitor_id: 9,
+                surface_handle: 0x5678,
+                logical_w: 1920,
+                logical_h: 1080,
+            },
+            ControlMessage::AppDetached {
+                app_id: 10,
+                reason: AppDetachReason::IoError as u8,
+            },
+        ];
+
+        samples
+            .into_iter()
+            .map(|msg| {
+                let mut buf = BytesMut::new();
+                msg.encode(&mut buf);
+                let header = MessageHeader::decode(&mut buf).unwrap();
+                (header.opcode, buf.to_vec())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn known_opcodes_decode_with_exact_payload_lengths() {
+        for (opcode, payload) in known_payload_samples() {
+            let mut buf = BytesMut::from(&payload[..]);
+            let decoded = ControlMessage::decode(opcode, payload.len() as u32, &mut buf)
+                .unwrap_or_else(|e| panic!("opcode {opcode:#06x} failed exact decode: {e}"));
+            assert!(decoded.is_some());
+            assert!(buf.is_empty(), "opcode {opcode:#06x} left bytes behind");
+        }
+    }
+
+    #[test]
+    fn known_opcodes_reject_short_or_long_payload_lengths() {
+        for (opcode, payload) in known_payload_samples() {
+            let mut short_buf = BytesMut::from(&payload[..]);
+            let short = ControlMessage::decode(opcode, payload.len() as u32 - 1, &mut short_buf);
+            assert!(
+                matches!(short, Err(ProtocolError::PayloadLengthMismatch)),
+                "opcode {opcode:#06x} accepted short payload_len: {short:?}"
+            );
+
+            let mut long_buf = BytesMut::from(&payload[..]);
+            let long = ControlMessage::decode(opcode, payload.len() as u32 + 1, &mut long_buf);
+            assert!(
+                matches!(long, Err(ProtocolError::PayloadLengthMismatch)),
+                "opcode {opcode:#06x} accepted long payload_len: {long:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_opcode_skips_full_advertised_payload() {
+        let payload = [1, 2, 3, 4, 5];
+        let mut buf = BytesMut::from(&payload[..]);
+        let decoded = ControlMessage::decode(0x9000, payload.len() as u32, &mut buf).unwrap();
+        assert!(decoded.is_none());
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn unknown_opcode_rejects_truncated_payload() {
+        let mut buf = BytesMut::from(&[1, 2][..]);
+        let decoded = ControlMessage::decode(0x9000, 3, &mut buf);
+        assert!(
+            matches!(
+                decoded,
+                Err(ProtocolError::BufferTooSmall {
+                    expected: 3,
+                    actual: 2
+                })
+            ),
+            "truncated unknown opcode should be BufferTooSmall, got {decoded:?}"
+        );
     }
 }

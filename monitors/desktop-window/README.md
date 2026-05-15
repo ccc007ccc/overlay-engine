@@ -53,6 +53,18 @@ Monitor:
 
 ## 运行
 
+### Release 安装后
+
+正式 release 中，Desktop Window Monitor 是可选组件。选择该组件时，安装器会在安装目录写入：
+
+```ini
+Launch=desktop-window-monitor.exe
+```
+
+`core-server.exe` 启动后会读取同目录的 `config.ini`，并自动拉起 `desktop-window-monitor.exe`。因此普通用户只需要从开始菜单或桌面快捷方式启动 overlay-engine，不需要手动单独启动 monitor。
+
+### 开发模式
+
 ```powershell
 cargo build --release -p desktop-window-monitor
 

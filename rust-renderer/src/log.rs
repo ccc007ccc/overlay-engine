@@ -72,4 +72,3 @@ pub(crate) fn clear_last_error() {
 pub(crate) fn last_error_string() -> Option<String> {
     LAST_ERROR.lock().ok().and_then(|g| g.clone())
 }
-

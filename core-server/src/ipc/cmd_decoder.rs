@@ -49,8 +49,9 @@ pub const CMD_PUSH_SPACE: u16 = 0x0109;
 /// Pop the top of the per-`SubmitFrame` space stack. Empty payload.
 pub const CMD_POP_SPACE: u16 = 0x010A;
 
-// --- Text opcode ---
+// --- Text / bitmap opcodes ---
 const CMD_DRAW_TEXT: u16 = 0x010B;
+const CMD_DRAW_BITMAP: u16 = 0x010C;
 
 /// Minimum DRAW_TEXT payload without UTF-8 bytes:
 /// f32 x/y/font_size + rgba[4] + u16 text_len.
@@ -93,42 +94,69 @@ fn read_rgba(buf: &mut BytesMut) -> [f32; 4] {
     ]
 }
 
+fn fixed_payload_len(opcode: u16) -> Option<usize> {
+    match opcode {
+        CMD_CLEAR => Some(16),
+        CMD_FILL_RECT | CMD_FILL_ELLIPSE => Some(32),
+        CMD_STROKE_RECT | CMD_STROKE_ELLIPSE => Some(36),
+        CMD_FILL_ROUNDED_RECT | CMD_DRAW_LINE => Some(40),
+        CMD_STROKE_ROUNDED_RECT | CMD_DRAW_BITMAP => Some(44),
+        CMD_PUSH_SPACE => Some(4),
+        CMD_POP_SPACE => Some(0),
+        _ => None,
+    }
+}
+
 pub fn decode_commands(data: &[u8]) -> Vec<RenderCommand> {
     let mut buf = BytesMut::from(data);
     let mut commands = Vec::new();
 
     while buf.remaining() >= CMD_HEADER_SIZE {
         let opcode = buf.get_u16_le();
-        let payload_len = buf.get_u16_le();
+        let payload_len = buf.get_u16_le() as usize;
+
+        if buf.remaining() < payload_len {
+            eprintln!(
+                "[cmd_decoder] opcode {:#06x} truncated payload: expected {}, got {}",
+                opcode,
+                payload_len,
+                buf.remaining()
+            );
+            break;
+        }
+
+        let mut payload = buf.split_to(payload_len);
+        if let Some(expected) = fixed_payload_len(opcode) {
+            if payload_len != expected {
+                eprintln!(
+                    "[cmd_decoder] opcode {:#06x} payload_len mismatch: expected {}, got {}; skipping",
+                    opcode,
+                    expected,
+                    payload_len
+                );
+                continue;
+            }
+        }
 
         match opcode {
             CMD_CLEAR => {
-                if buf.remaining() < 16 {
-                    break;
-                }
-                commands.push(RenderCommand::Clear(read_rgba(&mut buf)));
+                commands.push(RenderCommand::Clear(read_rgba(&mut payload)));
             }
             CMD_FILL_RECT => {
-                if buf.remaining() < 32 {
-                    break;
-                }
-                let x = buf.get_f32_le();
-                let y = buf.get_f32_le();
-                let w = buf.get_f32_le();
-                let h = buf.get_f32_le();
-                let rgba = read_rgba(&mut buf);
+                let x = payload.get_f32_le();
+                let y = payload.get_f32_le();
+                let w = payload.get_f32_le();
+                let h = payload.get_f32_le();
+                let rgba = read_rgba(&mut payload);
                 commands.push(RenderCommand::Draw(DrawCmd::FillRect { x, y, w, h, rgba }));
             }
             CMD_STROKE_RECT => {
-                if buf.remaining() < 36 {
-                    break;
-                }
-                let x = buf.get_f32_le();
-                let y = buf.get_f32_le();
-                let w = buf.get_f32_le();
-                let h = buf.get_f32_le();
-                let stroke_width = buf.get_f32_le();
-                let rgba = read_rgba(&mut buf);
+                let x = payload.get_f32_le();
+                let y = payload.get_f32_le();
+                let w = payload.get_f32_le();
+                let h = payload.get_f32_le();
+                let stroke_width = payload.get_f32_le();
+                let rgba = read_rgba(&mut payload);
                 commands.push(RenderCommand::Draw(DrawCmd::StrokeRect {
                     x,
                     y,
@@ -139,16 +167,13 @@ pub fn decode_commands(data: &[u8]) -> Vec<RenderCommand> {
                 }));
             }
             CMD_FILL_ROUNDED_RECT => {
-                if buf.remaining() < 40 {
-                    break;
-                }
-                let x = buf.get_f32_le();
-                let y = buf.get_f32_le();
-                let w = buf.get_f32_le();
-                let h = buf.get_f32_le();
-                let radius_x = buf.get_f32_le();
-                let radius_y = buf.get_f32_le();
-                let rgba = read_rgba(&mut buf);
+                let x = payload.get_f32_le();
+                let y = payload.get_f32_le();
+                let w = payload.get_f32_le();
+                let h = payload.get_f32_le();
+                let radius_x = payload.get_f32_le();
+                let radius_y = payload.get_f32_le();
+                let rgba = read_rgba(&mut payload);
                 commands.push(RenderCommand::Draw(DrawCmd::FillRoundedRect {
                     x,
                     y,
@@ -160,17 +185,14 @@ pub fn decode_commands(data: &[u8]) -> Vec<RenderCommand> {
                 }));
             }
             CMD_STROKE_ROUNDED_RECT => {
-                if buf.remaining() < 44 {
-                    break;
-                }
-                let x = buf.get_f32_le();
-                let y = buf.get_f32_le();
-                let w = buf.get_f32_le();
-                let h = buf.get_f32_le();
-                let radius_x = buf.get_f32_le();
-                let radius_y = buf.get_f32_le();
-                let stroke_width = buf.get_f32_le();
-                let rgba = read_rgba(&mut buf);
+                let x = payload.get_f32_le();
+                let y = payload.get_f32_le();
+                let w = payload.get_f32_le();
+                let h = payload.get_f32_le();
+                let radius_x = payload.get_f32_le();
+                let radius_y = payload.get_f32_le();
+                let stroke_width = payload.get_f32_le();
+                let rgba = read_rgba(&mut payload);
                 commands.push(RenderCommand::Draw(DrawCmd::StrokeRoundedRect {
                     x,
                     y,
@@ -183,14 +205,11 @@ pub fn decode_commands(data: &[u8]) -> Vec<RenderCommand> {
                 }));
             }
             CMD_FILL_ELLIPSE => {
-                if buf.remaining() < 32 {
-                    break;
-                }
-                let cx = buf.get_f32_le();
-                let cy = buf.get_f32_le();
-                let rx = buf.get_f32_le();
-                let ry = buf.get_f32_le();
-                let rgba = read_rgba(&mut buf);
+                let cx = payload.get_f32_le();
+                let cy = payload.get_f32_le();
+                let rx = payload.get_f32_le();
+                let ry = payload.get_f32_le();
+                let rgba = read_rgba(&mut payload);
                 commands.push(RenderCommand::Draw(DrawCmd::FillEllipse {
                     cx,
                     cy,
@@ -200,15 +219,12 @@ pub fn decode_commands(data: &[u8]) -> Vec<RenderCommand> {
                 }));
             }
             CMD_STROKE_ELLIPSE => {
-                if buf.remaining() < 36 {
-                    break;
-                }
-                let cx = buf.get_f32_le();
-                let cy = buf.get_f32_le();
-                let rx = buf.get_f32_le();
-                let ry = buf.get_f32_le();
-                let stroke_width = buf.get_f32_le();
-                let rgba = read_rgba(&mut buf);
+                let cx = payload.get_f32_le();
+                let cy = payload.get_f32_le();
+                let rx = payload.get_f32_le();
+                let ry = payload.get_f32_le();
+                let stroke_width = payload.get_f32_le();
+                let rgba = read_rgba(&mut payload);
                 commands.push(RenderCommand::Draw(DrawCmd::StrokeEllipse {
                     cx,
                     cy,
@@ -219,16 +235,13 @@ pub fn decode_commands(data: &[u8]) -> Vec<RenderCommand> {
                 }));
             }
             CMD_DRAW_LINE => {
-                if buf.remaining() < 40 {
-                    break;
-                }
-                let x0 = buf.get_f32_le();
-                let y0 = buf.get_f32_le();
-                let x1 = buf.get_f32_le();
-                let y1 = buf.get_f32_le();
-                let stroke_width = buf.get_f32_le();
-                let rgba = read_rgba(&mut buf);
-                let dash_style = buf.get_i32_le();
+                let x0 = payload.get_f32_le();
+                let y0 = payload.get_f32_le();
+                let x1 = payload.get_f32_le();
+                let y1 = payload.get_f32_le();
+                let stroke_width = payload.get_f32_le();
+                let rgba = read_rgba(&mut payload);
+                let dash_style = payload.get_i32_le();
                 commands.push(RenderCommand::Draw(DrawCmd::DrawLine {
                     x0,
                     y0,
@@ -239,22 +252,57 @@ pub fn decode_commands(data: &[u8]) -> Vec<RenderCommand> {
                     dash_style,
                 }));
             }
+            CMD_DRAW_BITMAP => {
+                let bitmap_id = payload.get_u32_le();
+                let src_x = payload.get_f32_le();
+                let src_y = payload.get_f32_le();
+                let src_w = payload.get_f32_le();
+                let src_h = payload.get_f32_le();
+                let dst_x = payload.get_f32_le();
+                let dst_y = payload.get_f32_le();
+                let dst_w = payload.get_f32_le();
+                let dst_h = payload.get_f32_le();
+                let opacity = payload.get_f32_le();
+                let interp_mode = payload.get_i32_le();
+                commands.push(RenderCommand::DrawBitmap(BitmapDrawCommand {
+                    bitmap_id,
+                    src_x,
+                    src_y,
+                    src_w,
+                    src_h,
+                    dst_x,
+                    dst_y,
+                    dst_w,
+                    dst_h,
+                    opacity,
+                    interp_mode,
+                }));
+            }
             CMD_DRAW_TEXT => {
-                if (payload_len as usize) < CMD_DRAW_TEXT_FIXED_PAYLOAD
-                    || buf.remaining() < payload_len as usize
-                {
-                    break;
+                if payload_len < CMD_DRAW_TEXT_FIXED_PAYLOAD {
+                    eprintln!(
+                        "[cmd_decoder] CMD_DRAW_TEXT payload too short: {} < {}; skipping",
+                        payload_len, CMD_DRAW_TEXT_FIXED_PAYLOAD
+                    );
+                    continue;
                 }
-                let x = buf.get_f32_le();
-                let y = buf.get_f32_le();
-                let font_size = buf.get_f32_le();
-                let rgba = read_rgba(&mut buf);
-                let text_len = buf.get_u16_le() as usize;
+
+                let x = payload.get_f32_le();
+                let y = payload.get_f32_le();
+                let font_size = payload.get_f32_le();
+                let rgba = read_rgba(&mut payload);
+                let text_len = payload.get_u16_le() as usize;
                 let expected_payload_len = CMD_DRAW_TEXT_FIXED_PAYLOAD + text_len;
-                if expected_payload_len != payload_len as usize || buf.remaining() < text_len {
-                    break;
+                if expected_payload_len != payload_len {
+                    eprintln!(
+                        "[cmd_decoder] CMD_DRAW_TEXT payload_len mismatch: expected {}, got {}; skipping",
+                        expected_payload_len,
+                        payload_len
+                    );
+                    continue;
                 }
-                let text_bytes = buf.copy_to_bytes(text_len);
+
+                let text_bytes = payload.copy_to_bytes(text_len);
                 match std::str::from_utf8(&text_bytes) {
                     Ok(text) => commands.push(RenderCommand::Draw(DrawCmd::DrawText {
                         text: text.to_owned(),
@@ -269,15 +317,7 @@ pub fn decode_commands(data: &[u8]) -> Vec<RenderCommand> {
                 }
             }
             CMD_PUSH_SPACE => {
-                // Payload: u32 space_id. Unknown value → warn + skip the
-                // PUSH (no RenderCommand emitted). Subsequent commands in
-                // the frame remain valid; we deliberately do NOT break out
-                // of the stream — task 3.2: "DO NOT crash or invalidate
-                // already-dispatched commands in the frame".
-                if buf.remaining() < 4 {
-                    break;
-                }
-                let space_id_raw = buf.get_u32_le();
+                let space_id_raw = payload.get_u32_le();
                 match SpaceId::from_u32(space_id_raw) {
                     Some(space) => commands.push(RenderCommand::PushSpace(space)),
                     None => {
@@ -290,19 +330,32 @@ pub fn decode_commands(data: &[u8]) -> Vec<RenderCommand> {
                 }
             }
             CMD_POP_SPACE => {
-                // Empty payload. Empty-stack misuse is dispatcher-scope
-                // (server_task.rs task 3.4) — the decoder always emits the
-                // PopSpace so the dispatcher can sequence it against its
-                // stack and warn+skip on underflow.
                 commands.push(RenderCommand::PopSpace);
             }
             _ => {
-                eprintln!("[cmd_decoder] unknown opcode: {:#06x}", opcode);
-                break;
+                eprintln!(
+                    "[cmd_decoder] unknown opcode: {:#06x}; skipping {} payload bytes",
+                    opcode, payload_len
+                );
             }
         }
     }
     commands
+}
+
+#[derive(Debug, Clone)]
+pub struct BitmapDrawCommand {
+    pub bitmap_id: u32,
+    pub src_x: f32,
+    pub src_y: f32,
+    pub src_w: f32,
+    pub src_h: f32,
+    pub dst_x: f32,
+    pub dst_y: f32,
+    pub dst_w: f32,
+    pub dst_h: f32,
+    pub opacity: f32,
+    pub interp_mode: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +365,7 @@ pub enum RenderCommand {
     /// Any of the 8 geometry `DrawCmd` variants produced by the
     /// `0x0101..=0x0108` opcodes.
     Draw(DrawCmd),
+    DrawBitmap(BitmapDrawCommand),
     /// `CMD_PUSH_SPACE` — push a coordinate space on the per-`SubmitFrame`
     /// space stack. The dispatcher (`server_task.rs`, task 3.4) maintains
     /// the stack; subsequent geometry commands render into the target
@@ -358,6 +412,14 @@ mod tests {
         }
     }
 
+    fn emit_clear(buf: &mut Vec<u8>, rgba: [f32; 4]) {
+        push_u16(buf, CMD_CLEAR);
+        push_u16(buf, 16);
+        for c in &rgba {
+            push_f32(buf, *c);
+        }
+    }
+
     fn emit_push_space(buf: &mut Vec<u8>, space_id: u32) {
         push_u16(buf, CMD_PUSH_SPACE);
         push_u16(buf, 4);
@@ -390,6 +452,16 @@ mod tests {
         buf.extend_from_slice(text_bytes);
     }
 
+    fn emit_draw_bitmap(buf: &mut Vec<u8>) {
+        push_u16(buf, CMD_DRAW_BITMAP);
+        push_u16(buf, 44);
+        push_u32(buf, 7);
+        for v in [1.0, 2.0, 32.0, 48.0, 10.0, 20.0, 64.0, 96.0, 0.75] {
+            push_f32(buf, v);
+        }
+        buf.extend_from_slice(&1i32.to_le_bytes());
+    }
+
     #[test]
     fn draw_text_decodes_to_drawcmd_text() {
         let mut buf = Vec::new();
@@ -410,6 +482,31 @@ mod tests {
                 assert_eq!(*rgba, [0.2, 0.9, 0.2, 1.0]);
             }
             other => panic!("expected DrawText, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn draw_bitmap_decodes_to_bitmap_command() {
+        let mut buf = Vec::new();
+        emit_draw_bitmap(&mut buf);
+
+        let cmds = decode_commands(&buf);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            RenderCommand::DrawBitmap(draw) => {
+                assert_eq!(draw.bitmap_id, 7);
+                assert_eq!(
+                    (draw.src_x, draw.src_y, draw.src_w, draw.src_h),
+                    (1.0, 2.0, 32.0, 48.0)
+                );
+                assert_eq!(
+                    (draw.dst_x, draw.dst_y, draw.dst_w, draw.dst_h),
+                    (10.0, 20.0, 64.0, 96.0)
+                );
+                assert_eq!(draw.opacity, 0.75);
+                assert_eq!(draw.interp_mode, 1);
+            }
+            other => panic!("expected DrawBitmap, got {:?}", other),
         }
     }
 
@@ -522,6 +619,80 @@ mod tests {
             RenderCommand::Draw(DrawCmd::FillRect { .. })
         ));
         assert!(matches!(cmds[1], RenderCommand::Clear(_)));
+    }
+
+    #[test]
+    fn malformed_fixed_payload_short_skips_and_preserves_following_command() {
+        let mut buf = Vec::new();
+        push_u16(&mut buf, CMD_FILL_RECT);
+        push_u16(&mut buf, 28);
+        buf.extend_from_slice(&[0u8; 28]);
+        emit_clear(&mut buf, [0.1, 0.2, 0.3, 0.4]);
+
+        let cmds = decode_commands(&buf);
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], RenderCommand::Clear(_)));
+    }
+
+    #[test]
+    fn malformed_fixed_payload_long_skips_and_preserves_following_command() {
+        let mut buf = Vec::new();
+        push_u16(&mut buf, CMD_FILL_RECT);
+        push_u16(&mut buf, 36);
+        buf.extend_from_slice(&[0u8; 36]);
+        emit_clear(&mut buf, [0.1, 0.2, 0.3, 0.4]);
+
+        let cmds = decode_commands(&buf);
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], RenderCommand::Clear(_)));
+    }
+
+    #[test]
+    fn push_and_pop_reject_wrong_payload_lengths_without_desync() {
+        let mut buf = Vec::new();
+        push_u16(&mut buf, CMD_PUSH_SPACE);
+        push_u16(&mut buf, 0);
+        push_u16(&mut buf, CMD_POP_SPACE);
+        push_u16(&mut buf, 4);
+        buf.extend_from_slice(&[0u8; 4]);
+        emit_clear(&mut buf, [0.1, 0.2, 0.3, 0.4]);
+
+        let cmds = decode_commands(&buf);
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], RenderCommand::Clear(_)));
+    }
+
+    #[test]
+    fn draw_text_length_mismatch_skips_and_preserves_following_command() {
+        let mut buf = Vec::new();
+        push_u16(&mut buf, CMD_DRAW_TEXT);
+        push_u16(&mut buf, 31);
+        push_f32(&mut buf, 1.0);
+        push_f32(&mut buf, 2.0);
+        push_f32(&mut buf, 12.0);
+        for c in &[1.0, 1.0, 1.0, 1.0] {
+            push_f32(&mut buf, *c);
+        }
+        push_u16(&mut buf, 2);
+        buf.push(b'a');
+        emit_clear(&mut buf, [0.1, 0.2, 0.3, 0.4]);
+
+        let cmds = decode_commands(&buf);
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], RenderCommand::Clear(_)));
+    }
+
+    #[test]
+    fn unknown_opcode_skips_payload_and_preserves_following_command() {
+        let mut buf = Vec::new();
+        push_u16(&mut buf, 0x9999);
+        push_u16(&mut buf, 3);
+        buf.extend_from_slice(&[1, 2, 3]);
+        emit_clear(&mut buf, [0.1, 0.2, 0.3, 0.4]);
+
+        let cmds = decode_commands(&buf);
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], RenderCommand::Clear(_)));
     }
 
     #[test]

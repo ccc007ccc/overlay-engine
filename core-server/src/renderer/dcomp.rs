@@ -1,7 +1,9 @@
 use crate::renderer::painter::D2DEngine;
 
 use windows::core::{IUnknown, Interface, Result};
-use windows::Win32::Foundation::{HANDLE, HMODULE, RECT, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{
+    CloseHandle, HANDLE, HMODULE, RECT, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::Graphics::CompositionSwapchain::{
     CreatePresentationFactory, IPresentationBuffer, IPresentationFactory, IPresentationManager,
     IPresentationSurface,
@@ -37,10 +39,9 @@ pub const COMPOSITIONOBJECT_ALL_ACCESS: u32 = 0x0003;
 /// under bursty presents; benchmark before changing.
 pub const BUFFER_COUNT: usize = 3;
 
-/// We now use an INFINITE timeout to explicitly allow backpressure.
-/// When DWM has consumed all buffers, the IPC reader will block, naturally
-/// throttling the client app via the pipe buffer, instead of dropping frames
-/// and wasting GPU rendering work or creating buffer bloat races.
+/// Poll presentation buffers without blocking. When all buffers are busy,
+/// the submit path drops that stale frame and continues draining IPC so
+/// unlocked producers never build a deep pipe/shared-memory backlog.
 pub const ACQUIRE_TIMEOUT_MS: u32 = 0;
 
 pub struct RenderContextGuard {
@@ -132,6 +133,124 @@ pub enum PresentOutcome {
     DeviceLost,
 }
 
+struct OwnedHandle(HANDLE);
+
+impl OwnedHandle {
+    fn new(handle: HANDLE) -> Self {
+        Self(handle)
+    }
+
+    fn get(&self) -> HANDLE {
+        self.0
+    }
+
+    fn into_raw(mut self) -> HANDLE {
+        let handle = self.0;
+        self.0 = HANDLE::default();
+        handle
+    }
+}
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.0 .0.is_null() && !self.0.is_invalid() {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+struct OwnedEventHandles {
+    handles: Vec<HANDLE>,
+}
+
+impl OwnedEventHandles {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            handles: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn push(&mut self, handle: HANDLE) {
+        self.handles.push(handle);
+    }
+
+    fn into_vec(mut self) -> Vec<HANDLE> {
+        std::mem::take(&mut self.handles)
+    }
+}
+
+impl Drop for OwnedEventHandles {
+    fn drop(&mut self) {
+        unsafe {
+            for handle in self.handles.drain(..) {
+                if !handle.0.is_null() && !handle.is_invalid() {
+                    let _ = CloseHandle(handle);
+                }
+            }
+        }
+    }
+}
+
+fn acquire_available_buffer(
+    manager: &IPresentationManager,
+    available_events: &[HANDLE],
+    timeout_ms: u32,
+) -> AcquireOutcome {
+    let wait_result =
+        unsafe { WaitForMultipleObjectsEx(available_events, false, timeout_ms, true) };
+
+    if wait_result == windows::Win32::Foundation::WAIT_IO_COMPLETION {
+        unsafe { while manager.GetNextPresentStatistics().is_ok() {} }
+        let retry = unsafe { WaitForMultipleObjectsEx(available_events, false, 0, false) };
+        let base = WAIT_OBJECT_0.0;
+        if retry.0 >= base && retry.0 < base + available_events.len() as u32 {
+            return AcquireOutcome::Acquired((retry.0 - base) as usize);
+        }
+        return AcquireOutcome::TimedOut;
+    }
+
+    if wait_result == WAIT_TIMEOUT {
+        return AcquireOutcome::TimedOut;
+    }
+    if wait_result == WAIT_FAILED {
+        return AcquireOutcome::Failed(windows::core::Error::from_win32());
+    }
+
+    let base = WAIT_OBJECT_0.0;
+    let code = wait_result.0;
+    if code >= base {
+        let idx = (code - base) as usize;
+        if idx < available_events.len() {
+            return AcquireOutcome::Acquired(idx);
+        }
+    }
+    AcquireOutcome::TimedOut
+}
+
+pub(crate) fn present_manager(manager: &IPresentationManager, log_name: &str) -> PresentOutcome {
+    match unsafe { manager.Present() } {
+        Ok(()) => PresentOutcome::Success,
+        Err(e) => {
+            let hr = e.code();
+            if hr == DXGI_ERROR_DEVICE_REMOVED
+                || hr == DXGI_ERROR_DEVICE_RESET
+                || hr == DXGI_ERROR_DEVICE_HUNG
+            {
+                eprintln!(
+                    "[{log_name}] Present fatal device-lost (HRESULT={:#010x}): {}",
+                    hr.0 as u32,
+                    e.message()
+                );
+                PresentOutcome::DeviceLost
+            } else {
+                PresentOutcome::RetryNextTick
+            }
+        }
+    }
+}
+
 /// Multi-buffer Canvas render resources. The single instances (`handle`,
 /// `manager`, `surface`, `render_w`, `render_h`) are per-Canvas and observed
 /// by Monitors through the NT `handle`; the parallel `Vec`s (`buffers`,
@@ -156,6 +275,7 @@ pub struct CanvasResources {
     // internal state the children still reference → ACCESS_VIOLATION.
     pub rtvs: Vec<ID3D11RenderTargetView>,
     pub buffers: Vec<IPresentationBuffer>,
+    pub available_events: Vec<HANDLE>,
     pub textures: Vec<ID3D11Texture2D>,
     pub surface: IPresentationSurface,
     pub manager: IPresentationManager,
@@ -165,13 +285,28 @@ pub struct CanvasResources {
 unsafe impl Send for CanvasResources {}
 unsafe impl Sync for CanvasResources {}
 
+impl Drop for CanvasResources {
+    fn drop(&mut self) {
+        unsafe {
+            for &ev in &self.available_events {
+                let _ = windows::Win32::Foundation::CloseHandle(ev);
+            }
+            if !self.handle.is_invalid() {
+                let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
 impl CanvasResources {
     pub fn new(d3d: &ID3D11Device, render_w: u32, render_h: u32) -> Result<Self> {
         let factory: IPresentationFactory = unsafe { CreatePresentationFactory(d3d)? };
         let manager: IPresentationManager = unsafe { factory.CreatePresentationManager()? };
-        let handle =
-            unsafe { DCompositionCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, None)? };
-        let surface: IPresentationSurface = unsafe { manager.CreatePresentationSurface(handle)? };
+        let handle = OwnedHandle::new(unsafe {
+            DCompositionCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, None)?
+        });
+        let surface: IPresentationSurface =
+            unsafe { manager.CreatePresentationSurface(handle.get())? };
         unsafe {
             surface.SetAlphaMode(DXGI_ALPHA_MODE_PREMULTIPLIED)?;
             let src = RECT {
@@ -205,6 +340,7 @@ impl CanvasResources {
         let mut textures: Vec<ID3D11Texture2D> = Vec::with_capacity(BUFFER_COUNT);
         let mut rtvs: Vec<ID3D11RenderTargetView> = Vec::with_capacity(BUFFER_COUNT);
         let mut buffers: Vec<IPresentationBuffer> = Vec::with_capacity(BUFFER_COUNT);
+        let mut available_events = OwnedEventHandles::with_capacity(BUFFER_COUNT);
 
         for _ in 0..BUFFER_COUNT {
             let mut texture: Option<ID3D11Texture2D> = None;
@@ -225,19 +361,22 @@ impl CanvasResources {
             let texture_unk: IUnknown = texture.cast()?;
             let buffer: IPresentationBuffer =
                 unsafe { manager.AddBufferFromResource(&texture_unk)? };
+            let ev = unsafe { buffer.GetAvailableEvent()? };
 
             textures.push(texture);
             rtvs.push(rtv);
             buffers.push(buffer);
+            available_events.push(ev);
         }
 
         Ok(Self {
-            handle,
+            handle: handle.into_raw(),
             manager,
             surface,
             render_w,
             render_h,
             buffers,
+            available_events: available_events.into_vec(),
             textures,
             rtvs,
         })
@@ -245,59 +384,14 @@ impl CanvasResources {
 
     /// Pick a buffer that is NOT currently held by DWM.
     ///
-    /// Polls `IPresentationBuffer::GetAvailableEvent` across all N buffers and
-    /// returns the index of the first signaled one via
-    /// `WaitForMultipleObjects(..., bWaitAll = false, timeout_ms)`.
-    /// A bounded-wait timeout tied to roughly one refresh period
-    /// (`ACQUIRE_TIMEOUT_MS`) means the IPC read loop can never be blocked for
-    /// longer than one frame even under pathological contention
-    /// (Preservation 3.8 / bugfix.md 3.8).
+    /// Polls cached available-event handles across all N buffers and returns
+    /// the index of the first signaled one via `WaitForMultipleObjectsEx`.
+    /// The handles are fetched once during construction; fetching them every
+    /// frame leaks kernel handles under unlocked producers.
     ///
     /// Design.md §Hypothesized Root Cause A.1 and §Fix Implementation → Change 2.
     pub fn acquire_available_buffer(&self, timeout_ms: u32) -> AcquireOutcome {
-        let mut events: Vec<HANDLE> = Vec::with_capacity(self.buffers.len());
-        for b in &self.buffers {
-            match unsafe { b.GetAvailableEvent() } {
-                Ok(h) => events.push(h),
-                Err(e) => return AcquireOutcome::Failed(e),
-            }
-        }
-
-        // Set bAlertable to true.
-        // If DWM hasn't recycled our buffer yet, we must allow its Present
-        // Completion APCs to execute during our wait. If we block without
-        // being alertable, the buffer might never become signaled.
-        let wait_result = unsafe { WaitForMultipleObjectsEx(&events, false, timeout_ms, true) };
-
-        if wait_result == windows::Win32::Foundation::WAIT_IO_COMPLETION {
-            // An APC ran. The buffer might now be available, so check again with 0 timeout.
-            let retry = unsafe { WaitForMultipleObjectsEx(&events, false, 0, false) };
-            let base = WAIT_OBJECT_0.0;
-            if retry.0 >= base && retry.0 < base + events.len() as u32 {
-                return AcquireOutcome::Acquired((retry.0 - base) as usize);
-            }
-            return AcquireOutcome::TimedOut;
-        }
-
-        if wait_result == WAIT_TIMEOUT {
-            return AcquireOutcome::TimedOut;
-        }
-        if wait_result == WAIT_FAILED {
-            return AcquireOutcome::Failed(windows::core::Error::from_win32());
-        }
-
-        // `WaitForMultipleObjects` returns `WAIT_OBJECT_0 + index` on success.
-        // Anything else in the high `WAIT_ABANDONED_0` range is not expected
-        // for non-mutex handles — treat defensively as a transient miss.
-        let base = WAIT_OBJECT_0.0;
-        let code = wait_result.0;
-        if code >= base {
-            let idx = (code - base) as usize;
-            if idx < self.buffers.len() {
-                return AcquireOutcome::Acquired(idx);
-            }
-        }
-        AcquireOutcome::TimedOut
+        acquire_available_buffer(&self.manager, &self.available_events, timeout_ms)
     }
 
     /// Call `IPresentationManager::Present` and classify the result.
@@ -311,25 +405,7 @@ impl CanvasResources {
     /// is now classified and logged with its HRESULT so callers can route to
     /// the correct recovery path.
     pub fn present(&self) -> PresentOutcome {
-        match unsafe { self.manager.Present() } {
-            Ok(()) => PresentOutcome::Success,
-            Err(e) => {
-                let hr = e.code();
-                if hr == DXGI_ERROR_DEVICE_REMOVED
-                    || hr == DXGI_ERROR_DEVICE_RESET
-                    || hr == DXGI_ERROR_DEVICE_HUNG
-                {
-                    eprintln!(
-                        "[CanvasResources] Present fatal device-lost (HRESULT={:#010x}): {}",
-                        hr.0 as u32,
-                        e.message()
-                    );
-                    PresentOutcome::DeviceLost
-                } else {
-                    PresentOutcome::RetryNextTick
-                }
-            }
-        }
+        present_manager(&self.manager, "CanvasResources")
     }
 
     /// Clear one of the N buffers to a solid color and Present. Used once at
@@ -411,6 +487,7 @@ pub struct PerMonitorResources {
     // COM children before parents — same drop-order fix as CanvasResources.
     pub rtvs: Vec<ID3D11RenderTargetView>,
     pub buffers: Vec<IPresentationBuffer>,
+    pub available_events: Vec<HANDLE>,
     pub textures: Vec<ID3D11Texture2D>,
     pub surface: IPresentationSurface,
     pub manager: IPresentationManager,
@@ -419,6 +496,19 @@ pub struct PerMonitorResources {
 
 unsafe impl Send for PerMonitorResources {}
 unsafe impl Sync for PerMonitorResources {}
+
+impl Drop for PerMonitorResources {
+    fn drop(&mut self) {
+        unsafe {
+            for &ev in &self.available_events {
+                let _ = windows::Win32::Foundation::CloseHandle(ev);
+            }
+            if !self.handle.is_invalid() {
+                let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+            }
+        }
+    }
+}
 
 impl PerMonitorResources {
     /// Create a per-Monitor MonitorLocal surface sized to
@@ -437,9 +527,11 @@ impl PerMonitorResources {
 
         let factory: IPresentationFactory = unsafe { CreatePresentationFactory(d3d)? };
         let manager: IPresentationManager = unsafe { factory.CreatePresentationManager()? };
-        let handle =
-            unsafe { DCompositionCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, None)? };
-        let surface: IPresentationSurface = unsafe { manager.CreatePresentationSurface(handle)? };
+        let handle = OwnedHandle::new(unsafe {
+            DCompositionCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, None)?
+        });
+        let surface: IPresentationSurface =
+            unsafe { manager.CreatePresentationSurface(handle.get())? };
         unsafe {
             surface.SetAlphaMode(DXGI_ALPHA_MODE_PREMULTIPLIED)?;
             let src = RECT {
@@ -473,6 +565,7 @@ impl PerMonitorResources {
         let mut textures: Vec<ID3D11Texture2D> = Vec::with_capacity(BUFFER_COUNT);
         let mut rtvs: Vec<ID3D11RenderTargetView> = Vec::with_capacity(BUFFER_COUNT);
         let mut buffers: Vec<IPresentationBuffer> = Vec::with_capacity(BUFFER_COUNT);
+        let mut available_events = OwnedEventHandles::with_capacity(BUFFER_COUNT);
 
         for _ in 0..BUFFER_COUNT {
             let mut texture: Option<ID3D11Texture2D> = None;
@@ -496,14 +589,16 @@ impl PerMonitorResources {
             let texture_unk: IUnknown = texture.cast()?;
             let buffer: IPresentationBuffer =
                 unsafe { manager.AddBufferFromResource(&texture_unk)? };
+            let ev = unsafe { buffer.GetAvailableEvent()? };
 
             textures.push(texture);
             rtvs.push(rtv);
             buffers.push(buffer);
+            available_events.push(ev);
         }
 
         Ok(Self {
-            handle,
+            handle: handle.into_raw(),
             manager,
             surface,
             render_w,
@@ -511,87 +606,25 @@ impl PerMonitorResources {
             logical_w,
             logical_h,
             buffers,
+            available_events: available_events.into_vec(),
             textures,
             rtvs,
         })
     }
 
     /// Mirror of `CanvasResources::acquire_available_buffer`. See that
-    /// method's doc-comment for the contract. Task 3.4 uses this when it
-    /// replays MonitorLocal-scoped geometry onto each monitor's surface.
+    /// method's doc-comment for the cached-handle contract. Task 3.4 uses
+    /// this when it replays MonitorLocal-scoped geometry onto each monitor's
+    /// surface.
     pub fn acquire_available_buffer(&self, timeout_ms: u32) -> AcquireOutcome {
-        let mut events: Vec<HANDLE> = Vec::with_capacity(self.buffers.len());
-        for b in &self.buffers {
-            match unsafe { b.GetAvailableEvent() } {
-                Ok(h) => events.push(h),
-                Err(e) => return AcquireOutcome::Failed(e),
-            }
-        }
-
-        // Set bAlertable to true.
-        // If DWM hasn't recycled our buffer yet, we must allow its Present
-        // Completion APCs to execute during our wait.
-        let wait_result = unsafe { WaitForMultipleObjectsEx(&events, false, timeout_ms, true) };
-
-        if wait_result == windows::Win32::Foundation::WAIT_IO_COMPLETION {
-            // An APC ran, likely signaling that DWM finished presenting.
-            // We MUST drain the present statistics so the Presentation Manager
-            // actually retires the buffer and signals the event!
-            unsafe {
-                while self.manager.GetNextPresentStatistics().is_ok() {}
-            }
-
-            // Now check again with 0 timeout.
-            let retry = unsafe { WaitForMultipleObjectsEx(&events, false, 0, false) };
-            let base = WAIT_OBJECT_0.0;
-            if retry.0 >= base && retry.0 < base + events.len() as u32 {
-                return AcquireOutcome::Acquired((retry.0 - base) as usize);
-            }
-            return AcquireOutcome::TimedOut;
-        }
-
-        if wait_result == WAIT_TIMEOUT {
-            return AcquireOutcome::TimedOut;
-        }
-        if wait_result == WAIT_FAILED {
-            return AcquireOutcome::Failed(windows::core::Error::from_win32());
-        }
-
-        let base = WAIT_OBJECT_0.0;
-        let code = wait_result.0;
-        if code >= base {
-            let idx = (code - base) as usize;
-            if idx < self.buffers.len() {
-                return AcquireOutcome::Acquired(idx);
-            }
-        }
-        AcquireOutcome::TimedOut
+        acquire_available_buffer(&self.manager, &self.available_events, timeout_ms)
     }
 
     /// Mirror of `CanvasResources::present`. Independent Present so a
     /// per-Monitor failure does not affect World or other Monitors
     /// (Preservation 3.4).
     pub fn present(&self) -> PresentOutcome {
-        match unsafe { self.manager.Present() } {
-            Ok(()) => PresentOutcome::Success,
-            Err(e) => {
-                let hr = e.code();
-                if hr == DXGI_ERROR_DEVICE_REMOVED
-                    || hr == DXGI_ERROR_DEVICE_RESET
-                    || hr == DXGI_ERROR_DEVICE_HUNG
-                {
-                    eprintln!(
-                        "[PerMonitorResources] Present fatal device-lost \
-                         (HRESULT={:#010x}): {}",
-                        hr.0 as u32,
-                        e.message()
-                    );
-                    PresentOutcome::DeviceLost
-                } else {
-                    PresentOutcome::RetryNextTick
-                }
-            }
-        }
+        present_manager(&self.manager, "PerMonitorResources")
     }
 
     /// Initial transparent-clear + present so DWM has a valid first buffer

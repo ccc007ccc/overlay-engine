@@ -6,13 +6,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
 use windows::core::Interface;
+use windows::Win32::Graphics::CompositionSwapchain::{
+    IPresentationBuffer, IPresentationManager, IPresentationSurface,
+};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_BOX,
+    ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Resource, ID3D11Texture2D, D3D11_BOX,
 };
 
-use crate::ipc::cmd_decoder::{RenderCommand, SpaceId};
+use crate::ipc::cmd_decoder::{BitmapDrawCommand, RenderCommand, SpaceId};
 use crate::ipc::protocol::{ControlMessage, MessageHeader, HEADER_SIZE};
-use crate::renderer::dcomp::{AcquireOutcome, PresentOutcome, ACQUIRE_TIMEOUT_MS};
+use crate::renderer::dcomp::{present_manager, AcquireOutcome, PresentOutcome, ACQUIRE_TIMEOUT_MS};
 use crate::renderer::painter::{D2DEngine, DrawCmd};
 
 pub const PIPE_NAME: &str = r"\\.\pipe\overlay-core";
@@ -33,7 +36,9 @@ const RENDER_DURATION_WARN_MS: u128 = 8;
 
 pub async fn run_server() -> anyhow::Result<()> {
     use std::ffi::CString;
-    use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorA, SDDL_REVISION_1};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorA, SDDL_REVISION_1,
+    };
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 
     // SDDL meaning:
@@ -63,7 +68,10 @@ pub async fn run_server() -> anyhow::Result<()> {
     let mut server = unsafe {
         server_options
             .first_pipe_instance(true)
-            .create_with_security_attributes_raw(PIPE_NAME, &mut sa as *mut _ as *mut std::ffi::c_void)?
+            .create_with_security_attributes_raw(
+                PIPE_NAME,
+                &mut sa as *mut _ as *mut std::ffi::c_void,
+            )?
     };
 
     // Free the security descriptor buffer allocated by Windows
@@ -101,12 +109,17 @@ pub async fn run_server() -> anyhow::Result<()> {
 
         let next_server_options = ServerOptions::new();
         server = unsafe {
-            next_server_options.create_with_security_attributes_raw(PIPE_NAME, &mut sa_next as *mut _ as *mut std::ffi::c_void)?
+            next_server_options.create_with_security_attributes_raw(
+                PIPE_NAME,
+                &mut sa_next as *mut _ as *mut std::ffi::c_void,
+            )?
         };
 
         unsafe {
             if !sd_next.0.is_null() {
-                windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(sd_next.0)));
+                windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
+                    sd_next.0,
+                )));
             }
         }
 
@@ -144,7 +157,7 @@ fn scan_targets(cmds: &[RenderCommand]) -> TargetUsage {
             RenderCommand::PopSpace => {
                 let _ = stack.pop();
             }
-            RenderCommand::Clear(_) | RenderCommand::Draw(_) => {
+            RenderCommand::Clear(_) | RenderCommand::Draw(_) | RenderCommand::DrawBitmap(_) => {
                 // Default space is World (empty stack or bottom-of-stack),
                 // per design.md §Fix Implementation → Change 6 and
                 // Preservation 3.6 / Bugfix 2.6. Only an explicit
@@ -160,6 +173,100 @@ fn scan_targets(cmds: &[RenderCommand]) -> TargetUsage {
         world_used,
         local_used,
     }
+}
+
+struct RenderTargetSnapshot {
+    render_w: u32,
+    render_h: u32,
+    rtv: ID3D11RenderTargetView,
+    buffer: IPresentationBuffer,
+    texture: ID3D11Texture2D,
+    surface: IPresentationSurface,
+    manager: IPresentationManager,
+}
+
+struct SubmitFrameTargets {
+    world: Option<RenderTargetSnapshot>,
+    locals: HashMap<u32, RenderTargetSnapshot>,
+}
+
+fn snapshot_canvas_target(
+    resources: &crate::renderer::dcomp::CanvasResources,
+    idx: usize,
+) -> Option<RenderTargetSnapshot> {
+    Some(RenderTargetSnapshot {
+        render_w: resources.render_w,
+        render_h: resources.render_h,
+        rtv: resources.rtvs.get(idx)?.clone(),
+        buffer: resources.buffers.get(idx)?.clone(),
+        texture: resources.textures.get(idx)?.clone(),
+        surface: resources.surface.clone(),
+        manager: resources.manager.clone(),
+    })
+}
+
+fn snapshot_monitor_target(
+    resources: &crate::renderer::dcomp::PerMonitorResources,
+    idx: usize,
+) -> Option<RenderTargetSnapshot> {
+    Some(RenderTargetSnapshot {
+        render_w: resources.render_w,
+        render_h: resources.render_h,
+        rtv: resources.rtvs.get(idx)?.clone(),
+        buffer: resources.buffers.get(idx)?.clone(),
+        texture: resources.textures.get(idx)?.clone(),
+        surface: resources.surface.clone(),
+        manager: resources.manager.clone(),
+    })
+}
+
+fn snapshot_submit_frame_targets(
+    canvas: &crate::ipc::server::Canvas,
+    canvas_id: u32,
+    frame_id: u64,
+    usage: &TargetUsage,
+) -> SubmitFrameTargets {
+    let world = if usage.world_used {
+        match canvas
+            .resources
+            .acquire_available_buffer(ACQUIRE_TIMEOUT_MS)
+        {
+            AcquireOutcome::Acquired(i) => snapshot_canvas_target(&canvas.resources, i),
+            AcquireOutcome::TimedOut => None,
+            AcquireOutcome::Failed(e) => {
+                eprintln!(
+                    "SubmitFrame: canvas={} frame={} World — acquire failed: {}",
+                    canvas_id, frame_id, e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut locals = HashMap::new();
+    if usage.local_used {
+        for (monitor_id, resources) in &canvas.per_monitor_surfaces {
+            match resources.acquire_available_buffer(ACQUIRE_TIMEOUT_MS) {
+                AcquireOutcome::Acquired(i) => {
+                    if let Some(target) = snapshot_monitor_target(resources, i) {
+                        locals.insert(*monitor_id, target);
+                    }
+                }
+                AcquireOutcome::TimedOut => {}
+                AcquireOutcome::Failed(e) => {
+                    eprintln!(
+                        "SubmitFrame: canvas={} frame={} monitor={} MonitorLocal \
+                         — acquire failed: {}",
+                        canvas_id, frame_id, monitor_id, e
+                    );
+                }
+            }
+        }
+    }
+
+    SubmitFrameTargets { world, locals }
 }
 
 /// Mirror of the original inline `FILL_RECT` → `UpdateSubresource` path
@@ -231,16 +338,12 @@ fn fill_rect_on_target(
     }
 }
 
-fn draw_text_on_target(
+fn draw_command_on_target(
     d2d: &D2DEngine,
     texture: &ID3D11Texture2D,
     rw: u32,
     rh: u32,
-    text: &str,
-    x: f32,
-    y: f32,
-    font_size: f32,
-    rgba: [f32; 4],
+    cmd: &DrawCmd,
 ) {
     let Ok(bitmap) = d2d.create_target_bitmap(texture) else {
         return;
@@ -259,10 +362,47 @@ fn draw_text_on_target(
             });
     }
     let mut painter = crate::renderer::painter::Painter::new(d2d, (rw, rh));
-    painter.draw_text(text, x, y, font_size, rgba);
+    painter.execute(cmd);
     unsafe {
         let _ = d2d.dc.EndDraw(None, None);
         d2d.dc.SetTarget(None);
+    }
+}
+
+fn draw_command_for_space(
+    d2d: &D2DEngine,
+    world_target: Option<&RenderTargetSnapshot>,
+    local_targets: &HashMap<u32, RenderTargetSnapshot>,
+    stack: &[SpaceId],
+    cmd: &DrawCmd,
+) {
+    match stack.last() {
+        Some(SpaceId::MonitorLocal) => {
+            for target in local_targets.values() {
+                draw_command_on_target(d2d, &target.texture, target.render_w, target.render_h, cmd);
+            }
+        }
+        _ => {
+            if let Some(target) = world_target {
+                draw_command_on_target(d2d, &target.texture, target.render_w, target.render_h, cmd);
+            }
+        }
+    }
+}
+
+fn draw_bitmap_command(draw: &BitmapDrawCommand, bitmap: u32) -> DrawCmd {
+    DrawCmd::DrawBitmap {
+        bitmap,
+        src_x: draw.src_x,
+        src_y: draw.src_y,
+        src_w: draw.src_w,
+        src_h: draw.src_h,
+        dst_x: draw.dst_x,
+        dst_y: draw.dst_y,
+        dst_w: draw.dst_w,
+        dst_h: draw.dst_h,
+        opacity: draw.opacity,
+        interp_mode: draw.interp_mode,
     }
 }
 
@@ -309,7 +449,7 @@ pub fn broadcast_app_detached(
         let mut notified = std::collections::HashSet::new();
         for cid in &app.canvas_ids {
             if let Some(canvas) = state.canvases.get(cid) {
-                for mid in canvas.per_monitor_surfaces.keys() {
+                for mid in &canvas.attached_monitor_ids {
                     if notified.insert(*mid) {
                         if let Some(monitor) = state.monitors.get(mid) {
                             if let Err(e) = monitor.tx.send(msg.clone()) {
@@ -446,6 +586,44 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                         );
                     }
                 }
+                ControlMessage::LoadBitmap { bitmap_id, bytes } => {
+                    if let Some((app_id, true)) = client_id {
+                        let devices = {
+                            let state = crate::ipc::server::SERVER_STATE.read();
+                            state.devices.clone()
+                        };
+                        match {
+                            let guard = devices.render_ctx.lock().unwrap();
+                            guard.d2d.load_bitmap_from_memory(&bytes)
+                        } {
+                            Ok(handle) => {
+                                let mut app_missing = false;
+                                let previous = {
+                                    let mut state = crate::ipc::server::SERVER_STATE.write();
+                                    match state.apps.get_mut(&app_id) {
+                                        Some(app) => app.bitmap_handles.insert(bitmap_id, handle),
+                                        None => {
+                                            app_missing = true;
+                                            None
+                                        }
+                                    }
+                                };
+                                if app_missing {
+                                    let guard = devices.render_ctx.lock().unwrap();
+                                    let _ = guard.d2d.destroy_bitmap(handle);
+                                } else if let Some(old) = previous {
+                                    let guard = devices.render_ctx.lock().unwrap();
+                                    let _ = guard.d2d.destroy_bitmap(old);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("LoadBitmap: bitmap_id={} failed: {}", bitmap_id, e);
+                            }
+                        }
+                    } else {
+                        eprintln!("LoadBitmap received but client is not a registered app");
+                    }
+                }
                 ControlMessage::SubmitFrame {
                     canvas_id,
                     frame_id,
@@ -458,39 +636,59 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                             let state = crate::ipc::server::SERVER_STATE.read();
                             if let Some(app) = state.apps.get(&app_id) {
                                 if let Some(ref ringbuf) = app.command_ringbuffer {
-                                    let data = ringbuf.data();
-                                    let start = offset as usize;
-                                    let end = start + length as usize;
-                                    if end <= data.len() {
-                                        Some(crate::ipc::cmd_decoder::decode_commands(&data[start..end]))
-                                    } else {
-                                        None
+                                    match ringbuf.command_slice(offset, length, 64 * 1024) {
+                                        Ok(data) => Some(crate::ipc::cmd_decoder::decode_commands(data)),
+                                        Err(e) => {
+                                            eprintln!(
+                                                "SubmitFrame: invalid command slice offset={} length={}: {}",
+                                                offset, length, e
+                                            );
+                                            None
+                                        }
                                     }
                                 } else { None }
                             } else { None }
                         };
 
                         if let Some(cmds) = cmds {
-                            let state = crate::ipc::server::SERVER_STATE.read();
-                            if let Some(app) = state.apps.get(&app_id) {
-                                let resolved_canvas_id = if canvas_id == 0 {
-                                    app.canvas_ids.first().copied().unwrap_or(0)
-                                } else {
-                                    canvas_id
-                                };
-                                if let Some(canvas) = state.canvases.get(&resolved_canvas_id) {
-                                    let guard = state.devices.render_ctx.lock().unwrap();
-                                    dispatch_submit_frame(
-                                        canvas,
-                                        &guard.d3d_ctx,
-                                        &guard.d2d,
-                                        resolved_canvas_id,
-                                        frame_id,
-                                        &cmds,
-                                        &mut render_durations,
-                                        frame_start,
-                                    );
-                                }
+                            let usage = scan_targets(&cmds);
+                            let snapshot = {
+                                let state = crate::ipc::server::SERVER_STATE.read();
+                                state.apps.get(&app_id).and_then(|app| {
+                                    let resolved_canvas_id = if canvas_id == 0 {
+                                        app.canvas_ids.first().copied().unwrap_or(0)
+                                    } else {
+                                        canvas_id
+                                    };
+                                    state.canvases.get(&resolved_canvas_id).map(|canvas| {
+                                        (
+                                            resolved_canvas_id,
+                                            snapshot_submit_frame_targets(
+                                                canvas,
+                                                resolved_canvas_id,
+                                                frame_id,
+                                                &usage,
+                                            ),
+                                            state.devices.clone(),
+                                            app.bitmap_handles.clone(),
+                                        )
+                                    })
+                                })
+                            };
+
+                            if let Some((resolved_canvas_id, targets, devices, bitmap_handles)) = snapshot {
+                                let guard = devices.render_ctx.lock().unwrap();
+                                dispatch_submit_frame(
+                                    targets,
+                                    &guard.d3d_ctx,
+                                    &guard.d2d,
+                                    resolved_canvas_id,
+                                    frame_id,
+                                    &cmds,
+                                    &bitmap_handles,
+                                    &mut render_durations,
+                                    frame_start,
+                                );
                             }
                         }
                     }
@@ -553,73 +751,18 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
 /// is byte-for-byte the pre-task-3.4 path — which is exactly what PBT B
 /// (preservation.rs) pins.
 fn dispatch_submit_frame(
-    canvas: &crate::ipc::server::Canvas,
+    targets: SubmitFrameTargets,
     ctx: &ID3D11DeviceContext,
     d2d: &D2DEngine,
     canvas_id: u32,
     frame_id: u64,
     cmds: &[RenderCommand],
+    bitmap_handles: &HashMap<u32, u32>,
     render_durations: &mut VecDeque<Duration>,
     frame_start: Instant,
 ) {
-    // ---------------------------------------------------------------
-    // Pre-scan: which targets will be written?
-    // Skipping unused targets preserves the zero-overhead World-only
-    // path for apps that never emit PUSH_SPACE (Preservation 3.6).
-    // ---------------------------------------------------------------
-    let usage = scan_targets(cmds);
-
-    // ---------------------------------------------------------------
-    // Acquire World buffer (if used). A timeout drops World ONLY —
-    // MonitorLocal targets still render (Preservation 3.4 symmetry).
-    // ---------------------------------------------------------------
-    let world_idx: Option<usize> = if usage.world_used {
-        match canvas
-            .resources
-            .acquire_available_buffer(ACQUIRE_TIMEOUT_MS)
-        {
-            AcquireOutcome::Acquired(i) => Some(i),
-            AcquireOutcome::TimedOut => {
-                // Silently drop
-                None
-            }
-            AcquireOutcome::Failed(e) => {
-                eprintln!(
-                    "SubmitFrame: canvas={} frame={} World — acquire failed: {}",
-                    canvas_id, frame_id, e
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // ---------------------------------------------------------------
-    // Acquire per-Monitor MonitorLocal buffers (if used). A timeout
-    // or failure on one monitor drops that monitor only — the others
-    // still render and Present (Preservation 3.4).
-    // ---------------------------------------------------------------
-    let mut local_idxs: HashMap<u32, usize> = HashMap::new();
-    if usage.local_used {
-        for (cid, pc) in &canvas.per_monitor_surfaces {
-            match pc.acquire_available_buffer(ACQUIRE_TIMEOUT_MS) {
-                AcquireOutcome::Acquired(i) => {
-                    local_idxs.insert(*cid, i);
-                }
-                AcquireOutcome::TimedOut => {
-                    // Silently drop
-                }
-                AcquireOutcome::Failed(e) => {
-                    eprintln!(
-                        "SubmitFrame: canvas={} frame={} monitor={} MonitorLocal \
-                         — acquire failed: {}",
-                        canvas_id, frame_id, cid, e
-                    );
-                }
-            }
-        }
-    }
+    let world_target = targets.world.as_ref();
+    let local_targets = &targets.locals;
 
     // ---------------------------------------------------------------
     // Single-pass render walk with the per-frame space stack.
@@ -644,47 +787,43 @@ fn dispatch_submit_frame(
             }
             RenderCommand::Clear(c) => match stack.last() {
                 Some(SpaceId::MonitorLocal) => {
-                    for (cid, idx) in &local_idxs {
-                        if let Some(pc) = canvas.per_monitor_surfaces.get(cid) {
-                            unsafe {
-                                ctx.ClearRenderTargetView(&pc.rtvs[*idx], c);
-                            }
+                    for target in local_targets.values() {
+                        unsafe {
+                            ctx.ClearRenderTargetView(&target.rtv, c);
                         }
                     }
                 }
                 _ => {
-                    if let Some(idx) = world_idx {
+                    if let Some(target) = world_target {
                         unsafe {
-                            ctx.ClearRenderTargetView(&canvas.resources.rtvs[idx], c);
+                            ctx.ClearRenderTargetView(&target.rtv, c);
                         }
                     }
                 }
             },
             RenderCommand::Draw(DrawCmd::FillRect { x, y, w, h, rgba }) => match stack.last() {
                 Some(SpaceId::MonitorLocal) => {
-                    for (cid, idx) in &local_idxs {
-                        if let Some(pc) = canvas.per_monitor_surfaces.get(cid) {
-                            fill_rect_on_target(
-                                ctx,
-                                &pc.textures[*idx],
-                                pc.render_w,
-                                pc.render_h,
-                                *x,
-                                *y,
-                                *w,
-                                *h,
-                                *rgba,
-                            );
-                        }
+                    for target in local_targets.values() {
+                        fill_rect_on_target(
+                            ctx,
+                            &target.texture,
+                            target.render_w,
+                            target.render_h,
+                            *x,
+                            *y,
+                            *w,
+                            *h,
+                            *rgba,
+                        );
                     }
                 }
                 _ => {
-                    if let Some(idx) = world_idx {
+                    if let Some(target) = world_target {
                         fill_rect_on_target(
                             ctx,
-                            &canvas.resources.textures[idx],
-                            canvas.resources.render_w,
-                            canvas.resources.render_h,
+                            &target.texture,
+                            target.render_w,
+                            target.render_h,
                             *x,
                             *y,
                             *w,
@@ -694,50 +833,15 @@ fn dispatch_submit_frame(
                     }
                 }
             },
-            RenderCommand::Draw(DrawCmd::DrawText {
-                text,
-                x,
-                y,
-                font_size,
-                rgba,
-            }) => match stack.last() {
-                Some(SpaceId::MonitorLocal) => {
-                    for (cid, idx) in &local_idxs {
-                        if let Some(pc) = canvas.per_monitor_surfaces.get(cid) {
-                            draw_text_on_target(
-                                d2d,
-                                &pc.textures[*idx],
-                                pc.render_w,
-                                pc.render_h,
-                                text,
-                                *x,
-                                *y,
-                                *font_size,
-                                *rgba,
-                            );
-                        }
-                    }
+            RenderCommand::Draw(cmd) => {
+                draw_command_for_space(d2d, world_target, local_targets, &stack, cmd);
+            }
+            RenderCommand::DrawBitmap(draw) => {
+                if let Some(bitmap) = bitmap_handles.get(&draw.bitmap_id) {
+                    let cmd = draw_bitmap_command(draw, *bitmap);
+                    draw_command_for_space(d2d, world_target, local_targets, &stack, &cmd);
                 }
-                _ => {
-                    if let Some(idx) = world_idx {
-                        draw_text_on_target(
-                            d2d,
-                            &canvas.resources.textures[idx],
-                            canvas.resources.render_w,
-                            canvas.resources.render_h,
-                            text,
-                            *x,
-                            *y,
-                            *font_size,
-                            *rgba,
-                        );
-                    }
-                }
-            },
-            // Remaining geometry opcodes decode-but-noop — Preservation
-            // 3.6. Adding GPU rendering for them is deliberately out of
-            // scope for task 3.4 (would change PBT B oracle hashes).
-            RenderCommand::Draw(_) => {}
+            }
         }
     }
     if !stack.is_empty() {
@@ -763,72 +867,54 @@ fn dispatch_submit_frame(
     // Present each target INDEPENDENTLY. A per-Monitor failure MUST
     // NOT affect World or other Monitors (Preservation 3.4).
     // ---------------------------------------------------------------
-    if let Some(idx) = world_idx {
+    if let Some(target) = world_target {
         unsafe {
-            match canvas
-                .resources
-                .surface
-                .SetBuffer(&canvas.resources.buffers[idx])
-            {
+            match target.surface.SetBuffer(&target.buffer) {
                 Err(e) => {
                     eprintln!(
                         "SubmitFrame: canvas={} frame={} World SetBuffer error: {}",
                         canvas_id, frame_id, e
                     );
                 }
-                Ok(()) => {
-                    match canvas.resources.present() {
-                        PresentOutcome::Success => {}
-                        PresentOutcome::RetryNextTick => {
-                            // Transient — frame dropped, app retries.
-                        }
-                        PresentOutcome::DeviceLost => {
-                            eprintln!(
-                                "SubmitFrame: canvas={} frame={} World device-lost \
-                                 — Canvas rebuild required (not yet implemented)",
-                                canvas_id, frame_id
-                            );
-                        }
+                Ok(()) => match present_manager(&target.manager, "CanvasResources") {
+                    PresentOutcome::Success => {}
+                    PresentOutcome::RetryNextTick => {}
+                    PresentOutcome::DeviceLost => {
+                        eprintln!(
+                            "SubmitFrame: canvas={} frame={} World device-lost \
+                             — Canvas rebuild required (not yet implemented)",
+                            canvas_id, frame_id
+                        );
                     }
-                    // DO NOT sleep/drain here after every present.
-                    // This was causing backpressure stalls because if the APC
-                    // hadn't arrived yet, we read nothing, but then blocked the
-                    // thread from getting it later. We now let acquire_available_buffer
-                    // do an alertable wait to fetch APCs exactly when we need them.
-                }
+                },
             }
         }
     }
 
-    for (cid, idx) in &local_idxs {
-        let Some(pc) = canvas.per_monitor_surfaces.get(cid) else {
-            continue;
-        };
+    for (monitor_id, target) in local_targets {
         unsafe {
-            match pc.surface.SetBuffer(&pc.buffers[*idx]) {
+            match target.surface.SetBuffer(&target.buffer) {
                 Err(e) => {
                     eprintln!(
                         "SubmitFrame: canvas={} frame={} monitor={} \
                          MonitorLocal SetBuffer error: {} — skipping this \
                          monitor only",
-                        canvas_id, frame_id, cid, e
+                        canvas_id, frame_id, monitor_id, e
                     );
                     continue;
                 }
-                Ok(()) => {
-                    match pc.present() {
-                        PresentOutcome::Success => {}
-                        PresentOutcome::RetryNextTick => {}
-                        PresentOutcome::DeviceLost => {
-                            eprintln!(
-                                "SubmitFrame: canvas={} frame={} monitor={} \
-                                 MonitorLocal device-lost — per-Monitor \
-                                 rebuild required (not yet implemented)",
-                                canvas_id, frame_id, cid
-                            );
-                        }
+                Ok(()) => match present_manager(&target.manager, "PerMonitorResources") {
+                    PresentOutcome::Success => {}
+                    PresentOutcome::RetryNextTick => {}
+                    PresentOutcome::DeviceLost => {
+                        eprintln!(
+                            "SubmitFrame: canvas={} frame={} monitor={} \
+                             MonitorLocal device-lost — per-Monitor \
+                             rebuild required (not yet implemented)",
+                            canvas_id, frame_id, monitor_id
+                        );
                     }
-                }
+                },
             }
         }
     }
@@ -836,16 +922,27 @@ fn dispatch_submit_frame(
     // Drain present statistics once at the end of the frame without blocking.
     // The APCs will arrive while we wait in `acquire_available_buffer`.
     unsafe {
-        while canvas.resources.manager.GetNextPresentStatistics().is_ok() {}
-        for pc in canvas.per_monitor_surfaces.values() {
-            while pc.manager.GetNextPresentStatistics().is_ok() {}
+        if let Some(target) = world_target {
+            while target.manager.GetNextPresentStatistics().is_ok() {}
+        }
+        for target in local_targets.values() {
+            while target.manager.GetNextPresentStatistics().is_ok() {}
         }
     }
 
     // ---------------------------------------------------------------
     // Rolling-average render-duration metric (task 3.4 requirement).
     // ---------------------------------------------------------------
-    let _ = record_render_duration(render_durations, frame_start.elapsed());
+    let (avg, warn) = record_render_duration(render_durations, frame_start.elapsed());
+    if warn {
+        eprintln!(
+            "[server_task] canvas={} frame={} avg render duration over last {} frames is {:.2}ms",
+            canvas_id,
+            frame_id,
+            RENDER_DURATION_WINDOW,
+            avg.as_secs_f64() * 1000.0
+        );
+    }
 }
 
 #[cfg(test)]

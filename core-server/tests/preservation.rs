@@ -264,7 +264,8 @@ fn build_control_plane_oracle() -> Vec<u8> {
 
     // Append the AppDetached sample (design.md §A2).
     let app_detached_sample = vec![
-        0x4c, 0x52, 0x56, 0x4f, 0x01, 0x00, 0x08, 0x00, 0x05, 0x00, 0x00, 0x00, 0x42, 0x00, 0x00, 0x00, 0x01,
+        0x4c, 0x52, 0x56, 0x4f, 0x01, 0x00, 0x08, 0x00, 0x05, 0x00, 0x00, 0x00, 0x42, 0x00, 0x00,
+        0x00, 0x01,
     ];
     out.extend_from_slice(&app_detached_sample);
 
@@ -276,7 +277,10 @@ fn build_control_plane_oracle() -> Vec<u8> {
 fn assert_roundtrip_bit_identical(msg: &ControlMessage) {
     let bytes = encode_one(msg);
     let decoded = decode_one(&bytes).unwrap_or_else(|e| {
-        panic!("decode(encode(msg)) failed for opcode {:#06x}: {e}", msg.opcode())
+        panic!(
+            "decode(encode(msg)) failed for opcode {:#06x}: {e}",
+            msg.opcode()
+        )
     });
     let bytes2 = encode_one(&decoded);
     assert_eq!(
@@ -319,11 +323,9 @@ fn any_create_canvas() -> impl Strategy<Value = ControlMessage> {
     )
 }
 fn any_attach_monitor() -> impl Strategy<Value = ControlMessage> {
-    (any::<u32>(), any::<u32>()).prop_map(|(canvas_id, monitor_id)| {
-        ControlMessage::AttachMonitor {
-            canvas_id,
-            monitor_id,
-        }
+    (any::<u32>(), any::<u32>()).prop_map(|(canvas_id, monitor_id)| ControlMessage::AttachMonitor {
+        canvas_id,
+        monitor_id,
     })
 }
 fn any_canvas_attached() -> impl Strategy<Value = ControlMessage> {
@@ -359,7 +361,8 @@ fn any_submit_frame() -> impl Strategy<Value = ControlMessage> {
     )
 }
 fn any_app_detached() -> impl Strategy<Value = ControlMessage> {
-    (any::<u32>(), 0..3u8).prop_map(|(app_id, reason)| ControlMessage::AppDetached { app_id, reason })
+    (any::<u32>(), 0..3u8)
+        .prop_map(|(app_id, reason)| ControlMessage::AppDetached { app_id, reason })
 }
 
 fn any_control_message() -> impl Strategy<Value = ControlMessage> {
@@ -392,12 +395,19 @@ fn pbt_a_oracle_capture_control_plane_bytes() {
 
 #[test]
 fn app_detached_oracle_sample_appended_byte_identical() {
-    let msg = ControlMessage::AppDetached { app_id: 0x42, reason: 1 };
+    let msg = ControlMessage::AppDetached {
+        app_id: 0x42,
+        reason: 1,
+    };
     let bytes = encode_one(&msg);
     let expected = vec![
-        0x4c, 0x52, 0x56, 0x4f, 0x01, 0x00, 0x08, 0x00, 0x05, 0x00, 0x00, 0x00, 0x42, 0x00, 0x00, 0x00, 0x01,
+        0x4c, 0x52, 0x56, 0x4f, 0x01, 0x00, 0x08, 0x00, 0x05, 0x00, 0x00, 0x00, 0x42, 0x00, 0x00,
+        0x00, 0x01,
     ];
-    assert_eq!(bytes, expected, "AppDetached encode mismatch from design.md §A2");
+    assert_eq!(
+        bytes, expected,
+        "AppDetached encode mismatch from design.md §A2"
+    );
 }
 
 proptest! {
@@ -676,7 +686,7 @@ fn render_world_software(cmds: &[RenderCommand], rw: u32, rh: u32) -> Vec<u8> {
             // change to that behavior (e.g. adding StrokeRect rendering
             // support) would be a preservation change that must be
             // deliberate and captured in a new oracle.
-            RenderCommand::Draw(_) => {}
+            RenderCommand::Draw(_) | RenderCommand::DrawBitmap(_) => {}
             // Task 3.2 added `PushSpace` / `PopSpace` to the decoder. The
             // World-only generator used by PBT B never emits `PUSH_SPACE`,
             // so these arms are unreachable for the generator domain — but
@@ -841,13 +851,14 @@ fn size_h() -> impl Strategy<Value = f32> {
     (0i32..((WORLD_RT_H + 8) as i32)).prop_map(|v| v as f32)
 }
 fn rgba() -> impl Strategy<Value = [f32; 4]> {
-    (0u8..=255, 0u8..=255, 0u8..=255, 0u8..=255)
-        .prop_map(|(r, g, b, a)| [
+    (0u8..=255, 0u8..=255, 0u8..=255, 0u8..=255).prop_map(|(r, g, b, a)| {
+        [
             r as f32 / 255.0,
             g as f32 / 255.0,
             b as f32 / 255.0,
             a as f32 / 255.0,
-        ])
+        ]
+    })
 }
 fn stroke_w() -> impl Strategy<Value = f32> {
     (1i32..=8).prop_map(|v| v as f32)
@@ -866,15 +877,42 @@ fn any_geom_op() -> impl Strategy<Value = GeomOp> {
             .prop_map(|(x, y, w, h, c)| GeomOp::FillRect(x, y, w, h, c)),
         (coord_x(), coord_y(), size_w(), size_h(), stroke_w(), rgba())
             .prop_map(|(x, y, w, h, sw, c)| GeomOp::StrokeRect(x, y, w, h, sw, c)),
-        (coord_x(), coord_y(), size_w(), size_h(), radius(), radius(), rgba())
+        (
+            coord_x(),
+            coord_y(),
+            size_w(),
+            size_h(),
+            radius(),
+            radius(),
+            rgba()
+        )
             .prop_map(|(x, y, w, h, rx, ry, c)| GeomOp::FillRoundedRect(x, y, w, h, rx, ry, c)),
-        (coord_x(), coord_y(), size_w(), size_h(), radius(), radius(), stroke_w(), rgba())
-            .prop_map(|(x, y, w, h, rx, ry, sw, c)| GeomOp::StrokeRoundedRect(x, y, w, h, rx, ry, sw, c)),
+        (
+            coord_x(),
+            coord_y(),
+            size_w(),
+            size_h(),
+            radius(),
+            radius(),
+            stroke_w(),
+            rgba()
+        )
+            .prop_map(|(x, y, w, h, rx, ry, sw, c)| GeomOp::StrokeRoundedRect(
+                x, y, w, h, rx, ry, sw, c
+            )),
         (coord_x(), coord_y(), radius(), radius(), rgba())
             .prop_map(|(cx, cy, rx, ry, c)| GeomOp::FillEllipse(cx, cy, rx, ry, c)),
         (coord_x(), coord_y(), radius(), radius(), stroke_w(), rgba())
             .prop_map(|(cx, cy, rx, ry, sw, c)| GeomOp::StrokeEllipse(cx, cy, rx, ry, sw, c)),
-        (coord_x(), coord_y(), coord_x(), coord_y(), stroke_w(), rgba(), dash_style())
+        (
+            coord_x(),
+            coord_y(),
+            coord_x(),
+            coord_y(),
+            stroke_w(),
+            rgba(),
+            dash_style()
+        )
             .prop_map(|(x0, y0, x1, y1, sw, c, d)| GeomOp::DrawLine(x0, y0, x1, y1, sw, c, d)),
     ]
 }
@@ -924,9 +962,7 @@ fn canonical_world_streams() -> Vec<(u64, Vec<GeomOp>)> {
             GeomOp::FillRect(5.0, 5.0, 10.0, 10.0, [1.0, 0.5, 0.0, 1.0]),
             GeomOp::StrokeRect(20.0, 5.0, 10.0, 10.0, 1.0, [1.0, 1.0, 0.0, 1.0]),
             GeomOp::FillRoundedRect(35.0, 5.0, 10.0, 10.0, 2.0, 2.0, [0.0, 1.0, 1.0, 1.0]),
-            GeomOp::StrokeRoundedRect(
-                50.0, 5.0, 10.0, 10.0, 2.0, 2.0, 1.0, [1.0, 0.0, 1.0, 1.0],
-            ),
+            GeomOp::StrokeRoundedRect(50.0, 5.0, 10.0, 10.0, 2.0, 2.0, 1.0, [1.0, 0.0, 1.0, 1.0]),
             GeomOp::FillEllipse(70.0, 10.0, 5.0, 5.0, [0.0, 0.0, 1.0, 1.0]),
             GeomOp::StrokeEllipse(85.0, 10.0, 5.0, 5.0, 1.0, [1.0, 1.0, 1.0, 1.0]),
             GeomOp::DrawLine(0.0, 0.0, 127.0, 63.0, 1.0, [0.5, 0.5, 0.5, 1.0], 0),
@@ -1026,6 +1062,13 @@ proptest! {
                         other
                     ),
                 },
+                RenderCommand::DrawBitmap(_) => {
+                    prop_assert!(
+                        false,
+                        "unexpected DrawBitmap variant from the World-only 8-opcode stream: {:?}",
+                        c
+                    );
+                }
                 RenderCommand::PushSpace(_) | RenderCommand::PopSpace => {
                     prop_assert!(
                         false,
@@ -1244,9 +1287,7 @@ fn exercise_consumer_sequence(steps: &[ConsumerStep]) -> Result<(), String> {
     // Use distinct host-PIDs so register_producer's CreateFileMapping names
     // don't collide across proptest cases or across tests. We pick a high,
     // unlikely-to-collide base.
-    let producer_pid_base: u32 = 0xDEAD_0000_u32.wrapping_add(
-        (std::process::id() & 0xFFFF) as u32,
-    );
+    let producer_pid_base: u32 = 0xDEAD_0000_u32.wrapping_add((std::process::id() & 0xFFFF) as u32);
     // Register a producer and create one canvas.
     let producer_id = state
         .register_app(producer_pid_base, windows_foundation_handle_null())
@@ -1267,13 +1308,8 @@ fn exercise_consumer_sequence(steps: &[ConsumerStep]) -> Result<(), String> {
                 if live.len() >= 4 {
                     continue;
                 }
-                let (tx, _rx) =
-                    tokio::sync::mpsc::unbounded_channel::<ControlMessage>();
-                let monitor_id = state.register_monitor(
-                    *pid,
-                    windows_foundation_handle_null(),
-                    tx,
-                );
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<ControlMessage>();
+                let monitor_id = state.register_monitor(*pid, windows_foundation_handle_null(), tx);
                 // attach_monitor is invoked by register_monitor auto-attach
                 // loop for every existing canvas — so our consumer should
                 // already be attached by the time we get here.
@@ -1527,7 +1563,13 @@ fn unit_preservation_fill_ellipse_decodes_unchanged() {
     let cmds = decode_commands(&buf);
     assert_eq!(cmds.len(), 1);
     match &cmds[0] {
-        RenderCommand::Draw(DrawCmd::FillEllipse { cx, cy, rx, ry, rgba }) => {
+        RenderCommand::Draw(DrawCmd::FillEllipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            rgba,
+        }) => {
             assert_eq!((*cx, *cy, *rx, *ry), (100.0, 200.0, 30.0, 40.0));
             assert_eq!(*rgba, [0.0, 1.0, 0.0, 0.5]);
         }
@@ -1638,6 +1680,7 @@ fn unit_preservation_all_8_opcodes_in_one_stream() {
             // would be an unambiguous preservation regression — surface it
             // as a distinct tag so the equality assertion below fails with
             // a readable diff instead of a panic-on-unreachable.
+            RenderCommand::DrawBitmap(_) => "DrawBitmap",
             RenderCommand::PushSpace(_) => "PushSpace",
             RenderCommand::PopSpace => "PopSpace",
         })

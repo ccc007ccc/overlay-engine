@@ -53,6 +53,7 @@ namespace OverlayWidget.Native
     {
         // MONITOR_DEFAULTTONEAREST：HWND 不在任一 monitor（罕见）也兜底返最近的
         private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+        private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
 
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT
@@ -92,6 +93,10 @@ namespace OverlayWidget.Native
         [DllImport("user32.dll", ExactSpelling = true)]
         private static extern int GetSystemMetrics(int nIndex);
 
+        [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
         private const int SM_CXSCREEN = 0;
         private const int SM_CYSCREEN = 1;
 
@@ -108,6 +113,13 @@ namespace OverlayWidget.Native
             }
             catch { }
             return (1920, 1080); // Fallback
+        }
+
+        public static void CloseHandleQuietly(IntPtr handle)
+        {
+            if (handle == IntPtr.Zero || handle == InvalidHandleValue) return;
+            try { CloseHandle(handle); }
+            catch (Exception) { }
         }
 
         /// <summary>

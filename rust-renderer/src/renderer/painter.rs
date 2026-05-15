@@ -60,14 +60,13 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-    ID2D1GradientStopCollection, ID2D1LinearGradientBrush,
-    ID2D1RadialGradientBrush, ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ARC_SEGMENT,
-    D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DASH_DOT,
-    D2D1_DASH_STYLE_DOT, D2D1_DASH_STYLE_SOLID, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_OPTIONS,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
+    ID2D1GradientStopCollection, ID2D1LinearGradientBrush, ID2D1RadialGradientBrush,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE,
+    D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND,
+    D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DASH_DOT, D2D1_DASH_STYLE_DOT, D2D1_DASH_STYLE_SOLID,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
     D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_LINE_JOIN_MITER, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
     D2D1_STROKE_STYLE_PROPERTIES1, D2D1_STROKE_TRANSFORM_TYPE_NORMAL,
@@ -568,11 +567,7 @@ impl D2DEngine {
         };
         unsafe {
             res.bitmap
-                .CopyFromMemory(
-                    Some(&dst),
-                    upload_slice.as_ptr() as *const _,
-                    stride_u,
-                )
+                .CopyFromMemory(Some(&dst), upload_slice.as_ptr() as *const _, stride_u)
                 .map_err(RendererError::DecodeFail)?;
         }
         Ok(())
@@ -801,12 +796,7 @@ pub enum DrawCmd {
         rgba: [f32; 4],
     },
     /// 推矩形 clip
-    PushClipRect {
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    },
+    PushClipRect { x: f32, y: f32, w: f32, h: f32 },
     /// 弹 clip 栈顶
     PopClip,
     /// 设置 2D 仿射变换（叠加在 viewport 平移之上）
@@ -833,12 +823,8 @@ pub enum DrawCmd {
     },
 
     // ===== v0.7 phase 5 path + 渐变（spec §2.3.4 / §2.5） =====
-
     /// 填充任意路径（path opcode byte 流）。0x06+ → UnsupportedFormat。
-    FillPath {
-        path: Vec<u8>,
-        rgba: [f32; 4],
-    },
+    FillPath { path: Vec<u8>, rgba: [f32; 4] },
     /// 描边任意路径（同上）。dash_style 沿用 stroke_rect 系列。
     StrokePath {
         path: Vec<u8>,
@@ -1304,7 +1290,10 @@ impl<'a> Painter<'a> {
             Err(_) => {
                 crate::log::emit(
                     4,
-                    &format!("draw_bitmap: handle {:#x} not found / expired", bitmap_handle),
+                    &format!(
+                        "draw_bitmap: handle {:#x} not found / expired",
+                        bitmap_handle
+                    ),
                 );
                 return;
             }
@@ -1427,12 +1416,11 @@ impl<'a> Painter<'a> {
                     let y3 = read_f32(path, i + 20);
                     i += 24;
                     if in_figure {
-                        let seg =
-                            windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
-                                point1: D2D_POINT_2F { x: x1, y: y1 },
-                                point2: D2D_POINT_2F { x: x2, y: y2 },
-                                point3: D2D_POINT_2F { x: x3, y: y3 },
-                            };
+                        let seg = windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                            point1: D2D_POINT_2F { x: x1, y: y1 },
+                            point2: D2D_POINT_2F { x: x2, y: y2 },
+                            point3: D2D_POINT_2F { x: x3, y: y3 },
+                        };
                         unsafe { sink.AddBezier(&seg as *const _) };
                         current = D2D_POINT_2F { x: x3, y: y3 };
                     }
@@ -1512,13 +1500,7 @@ impl<'a> Painter<'a> {
         }
     }
 
-    fn do_stroke_path(
-        &mut self,
-        path: &[u8],
-        stroke_width: f32,
-        color: [f32; 4],
-        dash_style: i32,
-    ) {
+    fn do_stroke_path(&mut self, path: &[u8], stroke_width: f32, color: [f32; 4], dash_style: i32) {
         let geom = match self.build_path_geometry(path, D2D1_FIGURE_BEGIN_HOLLOW) {
             Some(g) => g,
             None => return,
@@ -1559,10 +1541,7 @@ impl<'a> Painter<'a> {
         Some(out)
     }
 
-    fn build_gradient_collection(
-        &self,
-        stops: &[f32],
-    ) -> Option<ID2D1GradientStopCollection> {
+    fn build_gradient_collection(&self, stops: &[f32]) -> Option<ID2D1GradientStopCollection> {
         let arr = self.build_gradient_stops(stops)?;
         // dc 是 ID2D1DeviceContext。其上的 CreateGradientStopCollection 是 6 参版返
         // ID2D1GradientStopCollection1（子接口）。windows-rs Interface trait 的

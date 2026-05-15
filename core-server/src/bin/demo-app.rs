@@ -12,13 +12,25 @@ const PIPE_NAME: &str = r"\\.\pipe\overlay-core";
 
 const CMD_CLEAR: u16 = 0x0101;
 const CMD_FILL_RECT: u16 = 0x0102;
-const CMD_DRAW_TEXT: u16 = 0x010B;
-// Space-stack opcodes — task 3.2 of the `animation-and-viewport-fix` spec
-// (core-server/src/ipc/cmd_decoder.rs). Used below to surround any draws
-// that should be anchored to each monitor's client-area origin.
+const CMD_STROKE_RECT: u16 = 0x0103;
+const CMD_FILL_ROUNDED_RECT: u16 = 0x0104;
+const CMD_STROKE_ROUNDED_RECT: u16 = 0x0105;
+const CMD_FILL_ELLIPSE: u16 = 0x0106;
+const CMD_STROKE_ELLIPSE: u16 = 0x0107;
+const CMD_DRAW_LINE: u16 = 0x0108;
 const CMD_PUSH_SPACE: u16 = 0x0109;
 const CMD_POP_SPACE: u16 = 0x010A;
+const CMD_DRAW_TEXT: u16 = 0x010B;
+const CMD_DRAW_BITMAP: u16 = 0x010C;
 const SPACE_ID_MONITOR_LOCAL: u32 = 1;
+
+const TEXTURE_ORB: u32 = 1;
+const TEXTURE_GRID: u32 = 2;
+const TEXTURE_STRIPES: u32 = 3;
+
+static ORB_PNG: &[u8] = include_bytes!("../../assets/demo-textures/orb.png");
+static GRID_PNG: &[u8] = include_bytes!("../../assets/demo-textures/grid.png");
+static STRIPES_PNG: &[u8] = include_bytes!("../../assets/demo-textures/stripes.png");
 
 fn write_f32(buf: &mut [u8], pos: &mut usize, v: f32) {
     buf[*pos..*pos + 4].copy_from_slice(&v.to_le_bytes());
@@ -31,6 +43,11 @@ fn write_u16(buf: &mut [u8], pos: &mut usize, v: u16) {
 }
 
 fn write_u32(buf: &mut [u8], pos: &mut usize, v: u32) {
+    buf[*pos..*pos + 4].copy_from_slice(&v.to_le_bytes());
+    *pos += 4;
+}
+
+fn write_i32(buf: &mut [u8], pos: &mut usize, v: i32) {
     buf[*pos..*pos + 4].copy_from_slice(&v.to_le_bytes());
     *pos += 4;
 }
@@ -85,6 +102,167 @@ fn write_cmd_fill_rect(
     write_f32(buf, pos, a);
 }
 
+fn write_cmd_stroke_rect(
+    buf: &mut [u8],
+    pos: &mut usize,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) {
+    write_u16(buf, pos, CMD_STROKE_RECT);
+    write_u16(buf, pos, 36);
+    write_f32(buf, pos, x);
+    write_f32(buf, pos, y);
+    write_f32(buf, pos, w);
+    write_f32(buf, pos, h);
+    write_f32(buf, pos, stroke_width);
+    write_f32(buf, pos, r);
+    write_f32(buf, pos, g);
+    write_f32(buf, pos, b);
+    write_f32(buf, pos, a);
+}
+
+fn write_cmd_fill_rounded_rect(
+    buf: &mut [u8],
+    pos: &mut usize,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius_x: f32,
+    radius_y: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) {
+    write_u16(buf, pos, CMD_FILL_ROUNDED_RECT);
+    write_u16(buf, pos, 40);
+    write_f32(buf, pos, x);
+    write_f32(buf, pos, y);
+    write_f32(buf, pos, w);
+    write_f32(buf, pos, h);
+    write_f32(buf, pos, radius_x);
+    write_f32(buf, pos, radius_y);
+    write_f32(buf, pos, r);
+    write_f32(buf, pos, g);
+    write_f32(buf, pos, b);
+    write_f32(buf, pos, a);
+}
+
+fn write_cmd_stroke_rounded_rect(
+    buf: &mut [u8],
+    pos: &mut usize,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius_x: f32,
+    radius_y: f32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) {
+    write_u16(buf, pos, CMD_STROKE_ROUNDED_RECT);
+    write_u16(buf, pos, 44);
+    write_f32(buf, pos, x);
+    write_f32(buf, pos, y);
+    write_f32(buf, pos, w);
+    write_f32(buf, pos, h);
+    write_f32(buf, pos, radius_x);
+    write_f32(buf, pos, radius_y);
+    write_f32(buf, pos, stroke_width);
+    write_f32(buf, pos, r);
+    write_f32(buf, pos, g);
+    write_f32(buf, pos, b);
+    write_f32(buf, pos, a);
+}
+
+fn write_cmd_fill_ellipse(
+    buf: &mut [u8],
+    pos: &mut usize,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) {
+    write_u16(buf, pos, CMD_FILL_ELLIPSE);
+    write_u16(buf, pos, 32);
+    write_f32(buf, pos, cx);
+    write_f32(buf, pos, cy);
+    write_f32(buf, pos, rx);
+    write_f32(buf, pos, ry);
+    write_f32(buf, pos, r);
+    write_f32(buf, pos, g);
+    write_f32(buf, pos, b);
+    write_f32(buf, pos, a);
+}
+
+fn write_cmd_stroke_ellipse(
+    buf: &mut [u8],
+    pos: &mut usize,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) {
+    write_u16(buf, pos, CMD_STROKE_ELLIPSE);
+    write_u16(buf, pos, 36);
+    write_f32(buf, pos, cx);
+    write_f32(buf, pos, cy);
+    write_f32(buf, pos, rx);
+    write_f32(buf, pos, ry);
+    write_f32(buf, pos, stroke_width);
+    write_f32(buf, pos, r);
+    write_f32(buf, pos, g);
+    write_f32(buf, pos, b);
+    write_f32(buf, pos, a);
+}
+
+fn write_cmd_draw_line(
+    buf: &mut [u8],
+    pos: &mut usize,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    stroke_width: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) {
+    write_u16(buf, pos, CMD_DRAW_LINE);
+    write_u16(buf, pos, 40);
+    write_f32(buf, pos, x0);
+    write_f32(buf, pos, y0);
+    write_f32(buf, pos, x1);
+    write_f32(buf, pos, y1);
+    write_f32(buf, pos, stroke_width);
+    write_f32(buf, pos, r);
+    write_f32(buf, pos, g);
+    write_f32(buf, pos, b);
+    write_f32(buf, pos, a);
+    write_i32(buf, pos, 0);
+}
+
 fn write_cmd_draw_text(
     buf: &mut [u8],
     pos: &mut usize,
@@ -112,6 +290,244 @@ fn write_cmd_draw_text(
     write_u16(buf, pos, text_len as u16);
     buf[*pos..*pos + text_len].copy_from_slice(&bytes[..text_len]);
     *pos += text_len;
+}
+
+fn write_cmd_draw_bitmap(
+    buf: &mut [u8],
+    pos: &mut usize,
+    bitmap_id: u32,
+    src: (f32, f32, f32, f32),
+    dst: (f32, f32, f32, f32),
+    opacity: f32,
+    interp_mode: i32,
+) {
+    write_u16(buf, pos, CMD_DRAW_BITMAP);
+    write_u16(buf, pos, 44);
+    write_u32(buf, pos, bitmap_id);
+    write_f32(buf, pos, src.0);
+    write_f32(buf, pos, src.1);
+    write_f32(buf, pos, src.2);
+    write_f32(buf, pos, src.3);
+    write_f32(buf, pos, dst.0);
+    write_f32(buf, pos, dst.1);
+    write_f32(buf, pos, dst.2);
+    write_f32(buf, pos, dst.3);
+    write_f32(buf, pos, opacity);
+    write_i32(buf, pos, interp_mode);
+}
+
+fn wave01(v: f32) -> f32 {
+    (v.sin() * 0.5 + 0.5).clamp(0.0, 1.0)
+}
+
+fn write_complex_animation_scene(buf: &mut [u8], pos: &mut usize, cw: f32, ch: f32, t: f32) {
+    let min_dim = cw.min(ch);
+    let center_x = cw * 0.5;
+    let center_y = ch * 0.5;
+    let tau = std::f32::consts::TAU;
+
+    for i in 0..24 {
+        let fi = i as f32;
+        let angle = t * 0.55 + fi * tau / 24.0;
+        let x0 = center_x + angle.cos() * min_dim * 0.08;
+        let y0 = center_y + angle.sin() * min_dim * 0.05;
+        let x1 = center_x + angle.cos() * min_dim * 0.35;
+        let y1 = center_y + angle.sin() * min_dim * 0.24;
+        let a = 0.10 + wave01(t * 1.7 + fi * 0.31) * 0.16;
+        write_cmd_draw_line(buf, pos, x0, y0, x1, y1, 1.0, 0.15, 0.50, 1.00, a);
+    }
+
+    let panel_w = (cw * 0.42).clamp(420.0, 860.0);
+    let panel_h = (ch * 0.34).clamp(260.0, 520.0);
+    let panel_x = center_x - panel_w * 0.5 + (t * 0.35).sin() * cw * 0.035;
+    let panel_y = center_y - panel_h * 0.5 + (t * 0.27).cos() * ch * 0.035;
+    write_cmd_fill_rounded_rect(
+        buf,
+        pos,
+        panel_x + 12.0,
+        panel_y + 16.0,
+        panel_w,
+        panel_h,
+        30.0,
+        30.0,
+        0.0,
+        0.0,
+        0.0,
+        0.22,
+    );
+    write_cmd_fill_rounded_rect(
+        buf, pos, panel_x, panel_y, panel_w, panel_h, 28.0, 28.0, 0.03, 0.06, 0.12, 0.68,
+    );
+    write_cmd_stroke_rounded_rect(
+        buf, pos, panel_x, panel_y, panel_w, panel_h, 28.0, 28.0, 2.0, 0.20, 0.70, 1.00, 0.62,
+    );
+
+    write_cmd_draw_bitmap(
+        buf,
+        pos,
+        TEXTURE_GRID,
+        (0.0, 0.0, 0.0, 0.0),
+        (
+            panel_x + 18.0,
+            panel_y + 18.0,
+            panel_w - 36.0,
+            panel_h - 36.0,
+        ),
+        0.34,
+        1,
+    );
+    let stripe_src_x = (t * 22.0).rem_euclid(32.0);
+    write_cmd_draw_bitmap(
+        buf,
+        pos,
+        TEXTURE_STRIPES,
+        (stripe_src_x, 0.0, 96.0, 128.0),
+        (
+            panel_x + panel_w * 0.57,
+            panel_y + 26.0,
+            panel_w * 0.34,
+            panel_h - 52.0,
+        ),
+        0.24 + wave01(t * 1.4) * 0.20,
+        1,
+    );
+
+    let cols = 18usize;
+    let rows = 10usize;
+    let cell_w = panel_w / cols as f32;
+    let cell_h = panel_h / rows as f32;
+    for row in 0..rows {
+        for col in 0..cols {
+            let u = col as f32 / (cols - 1) as f32;
+            let v = row as f32 / (rows - 1) as f32;
+            let phase = t * 3.0 + col as f32 * 0.65 + row as f32 * 0.42;
+            let level = wave01(phase);
+            let a = 0.16 + level * 0.42;
+            write_cmd_fill_rect(
+                buf,
+                pos,
+                panel_x + col as f32 * cell_w + 2.0,
+                panel_y + row as f32 * cell_h + 2.0,
+                cell_w - 4.0,
+                cell_h - 4.0,
+                0.08 + u * 0.38,
+                0.22 + level * 0.58,
+                0.95 - u * 0.32 + v * 0.10,
+                a,
+            );
+        }
+    }
+
+    let lens_x = panel_x + panel_w * (0.5 + (t * 0.63).sin() * 0.30);
+    let lens_y = panel_y + panel_h * (0.5 + (t * 0.81).cos() * 0.24);
+    write_cmd_fill_ellipse(buf, pos, lens_x, lens_y, 62.0, 62.0, 1.0, 1.0, 1.0, 0.16);
+    write_cmd_stroke_ellipse(
+        buf, pos, lens_x, lens_y, 70.0, 70.0, 3.0, 0.55, 0.95, 1.0, 0.72,
+    );
+    let orb_size = 104.0 + wave01(t * 2.1) * 58.0;
+    write_cmd_draw_bitmap(
+        buf,
+        pos,
+        TEXTURE_ORB,
+        (0.0, 0.0, 0.0, 0.0),
+        (
+            lens_x - orb_size * 0.5,
+            lens_y - orb_size * 0.5,
+            orb_size,
+            orb_size,
+        ),
+        0.72 + wave01(t * 1.7) * 0.22,
+        1,
+    );
+
+    for i in 0..16 {
+        let fi = i as f32;
+        let angle = t * 0.9 + fi * tau / 16.0;
+        let pulse = wave01(t * 2.2 + fi * 0.73);
+        let cx = center_x + angle.cos() * (min_dim * 0.30 + pulse * 24.0);
+        let cy = center_y + angle.sin() * (min_dim * 0.20 + pulse * 18.0);
+        let radius = 8.0 + pulse * 18.0;
+        write_cmd_fill_ellipse(
+            buf,
+            pos,
+            cx,
+            cy,
+            radius,
+            radius,
+            0.95 - pulse * 0.30,
+            0.35 + pulse * 0.55,
+            0.15 + fi / 20.0,
+            0.78,
+        );
+    }
+
+    let diamond_r = min_dim * 0.09;
+    let mut points = [(0.0_f32, 0.0_f32); 4];
+    for (i, point) in points.iter_mut().enumerate() {
+        let angle = t * 1.15 + i as f32 * tau / 4.0;
+        *point = (
+            center_x + angle.cos() * diamond_r,
+            center_y + angle.sin() * diamond_r,
+        );
+    }
+    for i in 0..4 {
+        let (x0, y0) = points[i];
+        let (x1, y1) = points[(i + 1) % 4];
+        write_cmd_draw_line(buf, pos, x0, y0, x1, y1, 4.0, 1.0, 0.72, 0.18, 0.92);
+    }
+    write_cmd_stroke_rect(
+        buf,
+        pos,
+        center_x - diamond_r,
+        center_y - diamond_r,
+        diamond_r * 2.0,
+        diamond_r * 2.0,
+        2.0,
+        1.0,
+        1.0,
+        1.0,
+        0.38,
+    );
+
+    let bar_count = 32usize;
+    let bar_area_w = (cw * 0.72).clamp(480.0, 1200.0);
+    let bar_w = bar_area_w / bar_count as f32 * 0.56;
+    let gap = bar_area_w / bar_count as f32 * 0.44;
+    let base_x = center_x - bar_area_w * 0.5;
+    let base_y = (ch * 0.82).min(ch - 90.0).max(center_y + min_dim * 0.20);
+    for i in 0..bar_count {
+        let fi = i as f32;
+        let level = wave01(t * 2.6 + fi * 0.38) * wave01(t * 0.7 - fi * 0.13);
+        let h = 20.0 + level * min_dim * 0.12;
+        let x = base_x + fi * (bar_w + gap);
+        write_cmd_fill_rounded_rect(
+            buf,
+            pos,
+            x,
+            base_y - h,
+            bar_w,
+            h,
+            bar_w * 0.45,
+            bar_w * 0.45,
+            0.20 + level * 0.55,
+            0.85,
+            0.35 + fi / bar_count as f32 * 0.50,
+            0.70,
+        );
+    }
+
+    write_cmd_draw_text(
+        buf,
+        pos,
+        "Complex animation: geometry/text/PNG textures via IPC",
+        panel_x,
+        panel_y - 34.0,
+        18.0,
+        0.85,
+        0.92,
+        1.0,
+        0.92,
+    );
 }
 
 #[tokio::main]
@@ -157,6 +573,21 @@ async fn main() -> anyhow::Result<()> {
 
     // 等 server 处理 RegisterApp 并创建共享内存
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    for (bitmap_id, name, bytes) in [
+        (TEXTURE_ORB, "orb", ORB_PNG),
+        (TEXTURE_GRID, "grid", GRID_PNG),
+        (TEXTURE_STRIPES, "stripes", STRIPES_PNG),
+    ] {
+        ControlMessage::LoadBitmap {
+            bitmap_id,
+            bytes: bytes.to_vec(),
+        }
+        .encode(&mut buf);
+        client.write_all(&buf).await?;
+        buf.clear();
+        println!("[demo-app] 已上传贴图: {} (id={})", name, bitmap_id);
+    }
 
     // CreateCanvas（点对点）
     ControlMessage::CreateCanvas {
@@ -211,11 +642,10 @@ async fn main() -> anyhow::Result<()> {
     let start_time = std::time::Instant::now();
 
     // Use a simple ring-buffer strategy for the offset to prevent data races
-    // when running --unlocked. We advance the offset by 4KB each frame and
-    // wrap around at 2MB.
+    // when running --unlocked.
     let mut current_offset: u32 = 24;
     let max_offset: u32 = 14 * 1024 * 1024;
-    let frame_max_size: u32 = 4096;
+    let frame_max_size: u32 = 64 * 1024;
 
     loop {
         frame_id += 1;
@@ -335,6 +765,8 @@ async fn main() -> anyhow::Result<()> {
             1.0,
         );
 
+        write_complex_animation_scene(shmem_bytes, &mut pos, cw, ch, t);
+
         // ---- MonitorLocal 区间开始 ---------------------------------
         // 接下来的几个元素语义是"贴每个 monitor 客户区左上角"——
         // Core 会把它们 replay 到每个 monitor 自己的 per-Monitor surface
@@ -364,6 +796,17 @@ async fn main() -> anyhow::Result<()> {
             0.9,
             0.9,
             1.0,
+        );
+
+        let icon_size = 48.0 + wave01(t * 2.4) * 18.0;
+        write_cmd_draw_bitmap(
+            shmem_bytes,
+            &mut pos,
+            TEXTURE_ORB,
+            (0.0, 0.0, 0.0, 0.0),
+            (margin + 16.0, margin + 16.0, icon_size, icon_size),
+            0.88,
+            1,
         );
 
         // FPS 数字（左上角, MonitorLocal）

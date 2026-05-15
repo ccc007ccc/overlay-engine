@@ -61,7 +61,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIAdapter, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT,
+    IDXGIAdapter, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
+    DXGI_ERROR_DEVICE_HUNG, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT,
     DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
     DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
@@ -69,6 +70,27 @@ use windows::Win32::Graphics::Dxgi::{
 use crate::error::{RendererError, RendererResult};
 
 use super::painter::{D2DEngine, DrawCmd, Painter};
+
+const MAX_SWAPCHAIN_DIMENSION: u32 = 16_384;
+
+fn validate_viewport(vp_x: f32, vp_y: f32, vp_w: f32, vp_h: f32) -> RendererResult<(u32, u32)> {
+    if !vp_x.is_finite() || !vp_y.is_finite() || !vp_w.is_finite() || !vp_h.is_finite() {
+        return Err(RendererError::InvalidParam("non-finite viewport"));
+    }
+    if vp_w <= 0.0 || vp_h <= 0.0 {
+        return Err(RendererError::InvalidParam("non-positive viewport size"));
+    }
+
+    let new_vp_w = vp_w.round().max(1.0);
+    let new_vp_h = vp_h.round().max(1.0);
+    if new_vp_w > MAX_SWAPCHAIN_DIMENSION as f32 || new_vp_h > MAX_SWAPCHAIN_DIMENSION as f32 {
+        return Err(RendererError::InvalidParam(
+            "viewport size exceeds swap chain limit",
+        ));
+    }
+
+    Ok((new_vp_w as u32, new_vp_h as u32))
+}
 
 /// v0.6 DComp swap chain backend。
 ///
@@ -188,13 +210,14 @@ impl PinnedReadbackBackend {
                 "begin_frame called while previous frame is still in cmd-mode",
             ));
         }
-        let new_vp_w = (vp_w.round() as i32).max(1) as u32;
-        let new_vp_h = (vp_h.round() as i32).max(1) as u32;
+        let (new_vp_w, new_vp_h) = validate_viewport(vp_x, vp_y, vp_w, vp_h)?;
 
         // viewport 大小变化或首次 begin_frame（_d2d_bitmap=None）→ ResizeBuffers + 重建 bitmap
         if new_vp_w != self.vp_w || new_vp_h != self.vp_h || self.d2d_bitmap.is_none() {
             // 重建前先解绑 D2D target（如果旧 bitmap 还被 dc 当 target）
-            unsafe { self.d2d.dc.SetTarget(None); }
+            unsafe {
+                self.d2d.dc.SetTarget(None);
+            }
             self.d2d_bitmap = None;
 
             if new_vp_w != self.vp_w || new_vp_h != self.vp_h {
@@ -207,7 +230,7 @@ impl PinnedReadbackBackend {
                             DXGI_FORMAT_B8G8R8A8_UNORM,
                             DXGI_SWAP_CHAIN_FLAG(0),
                         )
-                        .map_err(RendererError::SwapChainInit)?;
+                        .map_err(RendererError::CanvasResizeFail)?;
                 }
                 self.vp_w = new_vp_w;
                 self.vp_h = new_vp_h;
@@ -686,11 +709,7 @@ impl PinnedReadbackBackend {
         Ok(())
     }
 
-    pub(crate) fn cmd_fill_path(
-        &mut self,
-        path: &[u8],
-        color: [f32; 4],
-    ) -> RendererResult<()> {
+    pub(crate) fn cmd_fill_path(&mut self, path: &[u8], color: [f32; 4]) -> RendererResult<()> {
         if !self.cmd_drawing {
             return Err(RendererError::InvalidParam(
                 "cmd_fill_path called outside begin_frame/end_frame",
@@ -810,29 +829,39 @@ impl PinnedReadbackBackend {
             .map(|s| s.elapsed().as_micros() as u64)
             .unwrap_or(0);
 
-        // 1) EndDraw + 解绑 target
+        let end_draw = unsafe { self.d2d.dc.EndDraw(None, None) };
         unsafe {
-            self.d2d
-                .dc
-                .EndDraw(None, None)
-                .map_err(RendererError::FrameAcquire)?;
             self.d2d.dc.SetTarget(None);
         }
-
-        // 2) Present(0, 0) —— SyncInterval=0 让 DComp 自己安排（不强制 vsync），Flags=0
-        let present_start = Instant::now();
-        unsafe {
-            // Present 返回 HRESULT；FLIP_SEQUENTIAL 下偶尔返 DXGI_STATUS_OCCLUDED 但不致命
-            let _ = self.swap_chain.Present(0, DXGI_PRESENT(0));
-        }
-        let present_us = present_start.elapsed().as_micros() as u64;
-
         self.cmd_drawing = false;
 
-        Ok(PresentFrame {
-            render_us,
-            present_us,
-        })
+        if let Err(e) = end_draw {
+            return Err(RendererError::FrameAcquire(e));
+        }
+
+        let present_start = Instant::now();
+        let present = unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) }.ok();
+        let present_us = present_start.elapsed().as_micros() as u64;
+
+        match present {
+            Ok(()) => Ok(PresentFrame {
+                render_us,
+                present_us,
+            }),
+            Err(e) => {
+                let hr = e.code();
+                if hr == DXGI_ERROR_DEVICE_REMOVED
+                    || hr == DXGI_ERROR_DEVICE_RESET
+                    || hr == DXGI_ERROR_DEVICE_HUNG
+                {
+                    crate::log::emit(
+                        4,
+                        &format!("DComp swap chain device lost during Present: {e}"),
+                    );
+                }
+                Err(RendererError::FrameAcquire(e))
+            }
+        }
     }
 
     /// v0.6 DComp：no-op 保持 ABI 兼容。Present 路径不需要 Unmap（没 mapped）。
@@ -857,7 +886,10 @@ impl PinnedReadbackBackend {
             }
             self.cmd_drawing = false;
             self.cmd_render_start = None;
-            crate::log::emit(3, "resize emergency-ended cmd-mode frame; rerun begin_frame");
+            crate::log::emit(
+                3,
+                "resize emergency-ended cmd-mode frame; rerun begin_frame",
+            );
         }
         self.width = width;
         self.height = height;
@@ -887,7 +919,9 @@ impl PinnedReadbackBackend {
     /// 无 ResizeBuffers 调用），保留给后续 phase 主动 resize 模式用。
     pub(crate) fn resize_canvas(&mut self, new_w: u32, new_h: u32) -> RendererResult<()> {
         if new_w == 0 || new_h == 0 {
-            return Err(RendererError::InvalidParam("zero pixel size on resize_canvas"));
+            return Err(RendererError::InvalidParam(
+                "zero pixel size on resize_canvas",
+            ));
         }
         if self.cmd_drawing {
             return Err(RendererError::FrameStillHeld);
@@ -935,11 +969,8 @@ fn create_dxgi_factory2(device: &ID3D11Device) -> RendererResult<IDXGIFactory2> 
             .GetAdapter()
             .map_err(RendererError::SwapChainInit)?
     };
-    let factory: IDXGIFactory2 = unsafe {
-        adapter
-            .GetParent()
-            .map_err(RendererError::SwapChainInit)?
-    };
+    let factory: IDXGIFactory2 =
+        unsafe { adapter.GetParent().map_err(RendererError::SwapChainInit)? };
     Ok(factory)
 }
 
@@ -988,4 +1019,40 @@ fn create_d2d_bitmap_from_buffer(
     // d2d.create_target_bitmap 已经在 painter 里做了 GetBuffer 转 IDXGISurface →
     // CreateBitmapFromDxgiSurface 的逻辑，复用
     d2d.create_target_bitmap(&buffer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_viewport_accepts_positive_finite_dimensions() {
+        assert_eq!(validate_viewport(0.0, 0.0, 1.0, 2.4).unwrap(), (1, 2));
+        assert_eq!(validate_viewport(0.0, 0.0, 0.4, 0.4).unwrap(), (1, 1));
+    }
+
+    #[test]
+    fn validate_viewport_rejects_non_finite_values() {
+        let err = validate_viewport(f32::NAN, 0.0, 1.0, 1.0).unwrap_err();
+        assert!(matches!(err, RendererError::InvalidParam(_)));
+
+        let err = validate_viewport(0.0, 0.0, f32::INFINITY, 1.0).unwrap_err();
+        assert!(matches!(err, RendererError::InvalidParam(_)));
+    }
+
+    #[test]
+    fn validate_viewport_rejects_non_positive_dimensions() {
+        let err = validate_viewport(0.0, 0.0, 0.0, 1.0).unwrap_err();
+        assert!(matches!(err, RendererError::InvalidParam(_)));
+
+        let err = validate_viewport(0.0, 0.0, 1.0, -1.0).unwrap_err();
+        assert!(matches!(err, RendererError::InvalidParam(_)));
+    }
+
+    #[test]
+    fn validate_viewport_rejects_oversized_dimensions() {
+        let too_large = MAX_SWAPCHAIN_DIMENSION as f32 + 1.0;
+        let err = validate_viewport(0.0, 0.0, too_large, 1.0).unwrap_err();
+        assert!(matches!(err, RendererError::InvalidParam(_)));
+    }
 }

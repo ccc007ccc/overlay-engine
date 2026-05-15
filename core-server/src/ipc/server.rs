@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use windows::Win32::Foundation::HANDLE;
 
-use crate::renderer::dcomp::{CanvasResources, CoreDevices, PerMonitorResources};
 use crate::ipc::shmem::SharedMemory;
+use crate::renderer::dcomp::{CanvasResources, CoreDevices, PerMonitorResources};
+use crate::renderer::resources::BitmapHandle;
 
 pub struct Canvas {
     pub id: u32,
@@ -28,6 +30,7 @@ pub struct Canvas {
     /// * the whole map (along with `resources`) is dropped when the
     ///   canvas's owner app disconnects (`remove_app`).
     pub per_monitor_surfaces: HashMap<u32, PerMonitorResources>,
+    pub attached_monitor_ids: HashSet<u32>,
 }
 
 pub struct App {
@@ -36,6 +39,7 @@ pub struct App {
     pub handle: HANDLE,
     pub canvas_ids: Vec<u32>, // Canvas IDs owned by this app
     pub command_ringbuffer: Option<SharedMemory>,
+    pub bitmap_handles: HashMap<u32, BitmapHandle>,
 }
 
 pub struct Monitor {
@@ -46,10 +50,10 @@ pub struct Monitor {
 }
 
 pub struct ServerState {
-    pub devices: CoreDevices,
-    pub apps: HashMap<u32, App>, // Keyed by App ID
+    pub devices: Arc<CoreDevices>,
+    pub apps: HashMap<u32, App>,         // Keyed by App ID
     pub monitors: HashMap<u32, Monitor>, // Keyed by Monitor ID
-    pub canvases: HashMap<u32, Canvas>,    // Keyed by Canvas ID
+    pub canvases: HashMap<u32, Canvas>,  // Keyed by Canvas ID
 
     next_app_id: u32,
     next_monitor_id: u32,
@@ -61,7 +65,7 @@ unsafe impl Sync for ServerState {}
 
 impl ServerState {
     pub fn new() -> anyhow::Result<Self> {
-        let devices = CoreDevices::new()?;
+        let devices = Arc::new(CoreDevices::new()?);
         Ok(Self {
             devices,
             apps: HashMap::new(),
@@ -88,12 +92,18 @@ impl ServerState {
                 handle,
                 canvas_ids: Vec::new(),
                 command_ringbuffer: Some(command_ringbuffer),
+                bitmap_handles: HashMap::new(),
             },
         );
         Ok(id)
     }
 
-    pub fn register_monitor(&mut self, pid: u32, handle: HANDLE, tx: tokio::sync::mpsc::UnboundedSender<crate::ipc::protocol::ControlMessage>) -> u32 {
+    pub fn register_monitor(
+        &mut self,
+        pid: u32,
+        handle: HANDLE,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::ipc::protocol::ControlMessage>,
+    ) -> u32 {
         let id = self.next_monitor_id;
         self.next_monitor_id += 1;
         self.monitors.insert(
@@ -147,6 +157,7 @@ impl ServerState {
                     logical_h,
                     resources,
                     per_monitor_surfaces: HashMap::new(),
+                    attached_monitor_ids: HashSet::new(),
                 },
             );
             app.canvas_ids.push(id);
@@ -172,11 +183,16 @@ impl ServerState {
             // for each owned canvas.
             for canvas_id in &app.canvas_ids {
                 if let Some(canvas) = self.canvases.get(canvas_id) {
-                    let _notified: Vec<u32> =
-                        canvas.per_monitor_surfaces.keys().copied().collect();
+                    let _notified: Vec<u32> = canvas.per_monitor_surfaces.keys().copied().collect();
                     // Future: send ControlMessage::CanvasDetached to each
                     // monitor in `_notified`. Today the drop below is the
                     // observable cleanup.
+                }
+            }
+            if !app.bitmap_handles.is_empty() {
+                let guard = self.devices.render_ctx.lock().unwrap();
+                for handle in app.bitmap_handles.into_values() {
+                    let _ = guard.d2d.destroy_bitmap(handle);
                 }
             }
             for canvas_id in app.canvas_ids {
@@ -191,6 +207,7 @@ impl ServerState {
         // MUST NOT affect other monitors or World resources.
         for canvas in self.canvases.values_mut() {
             canvas.per_monitor_surfaces.remove(&id);
+            canvas.attached_monitor_ids.remove(&id);
         }
         self.monitors.remove(&id);
     }
@@ -198,13 +215,7 @@ impl ServerState {
     pub fn attach_monitor(&mut self, canvas_id: u32, monitor_id: u32) -> anyhow::Result<()> {
         // First phase: borrow-immutably to read Canvas metadata and the
         // World surface handle; build the CanvasAttached message.
-        let (
-            surface_handle,
-            logical_w,
-            logical_h,
-            render_w,
-            render_h,
-        ) = {
+        let (surface_handle, logical_w, logical_h, render_w, render_h) = {
             let canvas = self
                 .canvases
                 .get(&canvas_id)
@@ -261,7 +272,15 @@ impl ServerState {
             render_w,
             render_h,
         };
-        let _ = monitor_tx.send(world_msg);
+        if monitor_tx.send(world_msg).is_err() {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(monitor_proc);
+            }
+            return Ok(());
+        }
+        if let Some(canvas) = self.canvases.get_mut(&canvas_id) {
+            canvas.attached_monitor_ids.insert(monitor_id);
+        }
 
         // Second phase: create (or reuse) the per-Monitor MonitorLocal
         // surface. Task 3.3 / design.md §Fix Implementation → Change 4, 5.
@@ -315,8 +334,7 @@ impl ServerState {
                             canvas_id, monitor_id, e
                         );
                         unsafe {
-                            let _ =
-                                windows::Win32::Foundation::CloseHandle(monitor_proc);
+                            let _ = windows::Win32::Foundation::CloseHandle(monitor_proc);
                         }
                         return Ok(());
                     }

@@ -20,6 +20,8 @@
 //!   直接显示，不经 XAML compositor，**modal 不阻塞**。
 
 pub(crate) mod device;
+/// v0.7 phase 3：Media Foundation 本地视频解码 → CPU BGRA32 → update_texture 路径
+pub(crate) mod mediafoundation;
 pub(crate) mod painter;
 /// v0.7 phase 2：bitmap / video / capture handle 共享的 slot table + ABA 防护
 pub(crate) mod resources;
@@ -28,8 +30,6 @@ pub(crate) mod resources;
 pub(crate) mod swapchain;
 /// v0.7 phase 2：WIC 图片解码 → IWICBitmapSource → ID2D1Bitmap1
 pub(crate) mod wic;
-/// v0.7 phase 3：Media Foundation 本地视频解码 → CPU BGRA32 → update_texture 路径
-pub(crate) mod mediafoundation;
 
 use std::ffi::c_void;
 
@@ -188,7 +188,8 @@ impl RendererState {
         stroke_width: f32,
         color: [f32; 4],
     ) -> RendererResult<()> {
-        self.surface.cmd_stroke_rect(x, y, w, h, stroke_width, color)
+        self.surface
+            .cmd_stroke_rect(x, y, w, h, stroke_width, color)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -326,7 +327,17 @@ impl RendererState {
         interp_mode: i32,
     ) -> RendererResult<()> {
         self.surface.cmd_draw_bitmap(
-            bitmap, src_x, src_y, src_w, src_h, dst_x, dst_y, dst_w, dst_h, opacity, interp_mode,
+            bitmap,
+            src_x,
+            src_y,
+            src_w,
+            src_h,
+            dst_x,
+            dst_y,
+            dst_w,
+            dst_h,
+            opacity,
+            interp_mode,
         )
     }
 
@@ -343,7 +354,8 @@ impl RendererState {
         color: [f32; 4],
         dash_style: i32,
     ) -> RendererResult<()> {
-        self.surface.cmd_stroke_path(path, stroke_width, color, dash_style)
+        self.surface
+            .cmd_stroke_path(path, stroke_width, color, dash_style)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -392,9 +404,7 @@ impl RendererState {
         // 总共 1 次额外 create + 1 次额外 destroy（仅 open 时一次性开销，可接受）。
 
         // step 1：先用临时小 bitmap 占 slot
-        let dummy = self
-            .surface
-            .create_texture(1, 1, TEXTURE_FORMAT_BGRA8)?;
+        let dummy = self.surface.create_texture(1, 1, TEXTURE_FORMAT_BGRA8)?;
         // step 2：open MF source reader 拿 (w,h)
         let video_temp = match VideoSource::open_file(path, dummy) {
             Ok(v) => v,
@@ -408,9 +418,9 @@ impl RendererState {
         // step 3：destroy 占位 + 创真实尺寸的 bitmap
         // 顺序：先 destroy → 再 create。slot 不够时 ResourceLimit 报回去。
         let _ = self.surface.destroy_bitmap(dummy);
-        let real_bitmap = self
-            .surface
-            .create_texture(info.width, info.height, TEXTURE_FORMAT_BGRA8)?;
+        let real_bitmap =
+            self.surface
+                .create_texture(info.width, info.height, TEXTURE_FORMAT_BGRA8)?;
         // step 4：把 video_temp 拆出来重建 with real bitmap handle
         // VideoSource 内部 reader / staging 不依赖 bitmap 字段（仅在 close 时由上层用）
         let mut video = video_temp;
@@ -452,7 +462,10 @@ impl RendererState {
     /// 解一帧并 update_texture 到内部 bitmap。
     /// 返 (bitmap_handle, eof)。eof=true 表示流结束，bitmap 仍是最后一帧。
     /// **每个 video 反复调返同一 BitmapHandle**（spec §4.1）—— 业务用 cmd_draw_bitmap 画即可。
-    pub(crate) fn video_present_frame(&mut self, video: u32) -> RendererResult<(BitmapHandle, bool)> {
+    pub(crate) fn video_present_frame(
+        &mut self,
+        video: u32,
+    ) -> RendererResult<(BitmapHandle, bool)> {
         // 拿 video 引用 → 解一帧到 staging → 把 staging 上传到 painter bitmap。
         // 借用栅栏：read_next_frame 借 &mut videos.get_mut(video)，update_texture 借 &mut self.surface。
         // 两个借用不重叠。

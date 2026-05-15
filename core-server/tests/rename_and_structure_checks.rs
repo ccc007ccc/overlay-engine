@@ -19,7 +19,10 @@ fn assert_contains(haystack: &str, needle: &str) {
 }
 
 fn assert_not_contains(haystack: &str, needle: &str) {
-    assert!(!haystack.contains(needle), "unexpected stale symbol/text {needle:?}");
+    assert!(
+        !haystack.contains(needle),
+        "unexpected stale symbol/text {needle:?}"
+    );
 }
 
 #[test]
@@ -88,11 +91,19 @@ fn server_state_uses_app_monitor_method_and_resource_names() {
 fn dcomp_resource_names_are_monitor_based() {
     let dcomp = read_core("src/renderer/dcomp.rs");
 
-    for needle in ["PerMonitorResources", "PER_MONITOR_MAX_DIM", "PER_MONITOR_MIN_DIM"] {
+    for needle in [
+        "PerMonitorResources",
+        "PER_MONITOR_MAX_DIM",
+        "PER_MONITOR_MIN_DIM",
+    ] {
         assert_contains(&dcomp, needle);
     }
 
-    for needle in ["PerConsumerResources", "PER_CONSUMER_MAX_DIM", "PER_CONSUMER_MIN_DIM"] {
+    for needle in [
+        "PerConsumerResources",
+        "PER_CONSUMER_MAX_DIM",
+        "PER_CONSUMER_MIN_DIM",
+    ] {
         assert_not_contains(&dcomp, needle);
     }
 }

@@ -32,13 +32,13 @@
           PointerEntered="OnRootPointerEntered"
           PointerExited="OnRootPointerExited">
         <!--
-            第一层 (z-order 最低): 半透明灰占位
-            - 启动时 / Rust 渲染没到来时显示，让 widget 不是黑乎乎一片
-            - DComp visual 挂上后会在它之上，但 visual 内容 alpha < 1 时仍能透出底色
+            第一层 (z-order 最低): 透明占位
+            - 只负责撑满布局，不提供底色
+            - DComp visual 挂上后会在它之上，visual 内容 alpha < 1 时仍保持透明
             - IsHitTestVisible=False：clicks 透传到底下
         -->
         <Border x:Name="PlaceholderBg"
-                Background="#80606060"
+                Background="Transparent"
                 IsHitTestVisible="False" />
 
         <!--
