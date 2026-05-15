@@ -75,6 +75,7 @@ struct MonitorLocalAttach {
 struct WindowAttachment {
     _canvas_id: u32,
     _target: IDCompositionTarget,
+    _root_visual: IDCompositionVisual2,
     _world_visual: IDCompositionVisual2,
     _surface_wrapper: IUnknown,
     _ml_visual_state: Option<(IDCompositionVisual2, IUnknown)>,
@@ -355,6 +356,12 @@ fn build_attachment(
     }
     let target = unsafe { dcomp_dev.CreateTargetForHwnd(hwnd, true)? };
 
+    let root = unsafe { dcomp_dev.CreateVisual()? };
+    unsafe {
+        root.AddVisual(&visual, false, None::<&IDCompositionVisual>)?;
+        target.SetRoot(&root)?;
+    }
+
     let ml_visual_state = if let Some(ml) = attach.ml_info {
         let ml_dup_handle = windows::Win32::Foundation::HANDLE(ml.surface_handle as *mut _);
         let ml_surface: IUnknown = unsafe { dcomp_dev.CreateSurfaceFromHandle(ml_dup_handle)? };
@@ -362,13 +369,7 @@ fn build_attachment(
         unsafe {
             ml_visual.SetContent(&ml_surface)?;
             ml_visual.SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR)?;
-        }
-
-        let root = unsafe { dcomp_dev.CreateVisual()? };
-        unsafe {
-            root.AddVisual(&visual, false, None::<&IDCompositionVisual>)?;
             root.AddVisual(&ml_visual, true, &visual)?;
-            target.SetRoot(&root)?;
             dcomp_dev.Commit()?;
         }
         println!("[desktop-monitor] mounted dual visual tree (World + MonitorLocal)");
@@ -376,7 +377,6 @@ fn build_attachment(
         Some((ml_visual, ml_surface))
     } else {
         unsafe {
-            target.SetRoot(&visual)?;
             dcomp_dev.Commit()?;
         }
         println!("[desktop-monitor] mounted single visual tree (World only)");
@@ -404,6 +404,7 @@ fn build_attachment(
     Ok(WindowAttachment {
         _canvas_id: attach.canvas_id,
         _target: target,
+        _root_visual: root,
         _world_visual: visual,
         _surface_wrapper: surface_wrapper,
         _ml_visual_state: ml_visual_state,
@@ -418,12 +419,7 @@ fn hot_attach_ml(att: &mut WindowAttachment, surface_handle: u64) -> anyhow::Res
     unsafe {
         ml_visual.SetContent(&ml_surface)?;
         ml_visual.SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR)?;
-    }
-    let root = unsafe { att._dcomp_dev.CreateVisual()? };
-    unsafe {
-        root.AddVisual(&att._world_visual, false, None::<&IDCompositionVisual>)?;
-        root.AddVisual(&ml_visual, true, &att._world_visual)?;
-        att._target.SetRoot(&root)?;
+        att._root_visual.AddVisual(&ml_visual, true, &att._world_visual)?;
         att._dcomp_dev.Commit()?;
     }
     att._ml_visual_state = Some((ml_visual, ml_surface));
@@ -451,14 +447,28 @@ async fn reconnect_with_backoff(
         );
         tokio::time::sleep(delay).await;
 
-        match register_and_wait_attach(window.hwnd).await {
-            Ok((new_pipe, attach)) => {
-                window.attachment = Some(build_attachment(window.hwnd, attach, window.pending_close.clone())?);
-                spawn_pipe_reader(window.id, new_pipe, pipe_events);
-                return Ok(());
-            }
+        match create_monitor_hwnd() {
+            Ok(new_hwnd) => match register_and_wait_attach(new_hwnd).await {
+                Ok((new_pipe, attach)) => {
+                    let old_hwnd = window.hwnd;
+                    window.hwnd = new_hwnd;
+
+                    window.attachment = Some(build_attachment(new_hwnd, attach, window.pending_close.clone())?);
+                    spawn_pipe_reader(window.id, new_pipe, pipe_events);
+
+                    unsafe {
+                        let _ = ShowWindow(new_hwnd, SW_SHOW);
+                        let _ = DestroyWindow(old_hwnd);
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    unsafe { let _ = DestroyWindow(new_hwnd); }
+                    eprintln!("[desktop-monitor] reconnect attempt {} failed: {e}", attempt + 1);
+                }
+            },
             Err(e) => {
-                eprintln!("[desktop-monitor] reconnect attempt {} failed: {e}", attempt + 1);
+                eprintln!("[desktop-monitor] reconnect attempt {} failed to create window: {e}", attempt + 1);
             }
         }
     }
@@ -750,49 +760,45 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                         canvas_id, surface_handle, logical_w, logical_h, render_w, render_h,
                     } } => {
                         println!("[desktop-monitor] CanvasAttached on window {}: canvas={}", window_id, canvas_id);
-                        if let Some(window) = windows.iter_mut().find(|w| w.id == window_id) {
-                            let attach = CanvasAttach {
-                                canvas_id, surface_handle, logical_w, logical_h, render_w, render_h,
-                                ml_info: None,
-                            };
-                            match build_attachment(window.hwnd, attach, window.pending_close.clone()) {
-                                Ok(a) => {
-                                    window.attachment = Some(a);
-                                    set_window_title(window.hwnd, AttachState::Attached { canvas_id, ml: false });
-                                }
-                                Err(e) => eprintln!("[desktop-monitor] re-attach failed: {e}"),
-                            }
-                        } else {
-                            match create_monitor_hwnd() {
-                                Ok(hwnd) => {
-                                    let pending_close = Arc::new(AtomicBool::new(false));
-                                    let in_frame = Arc::new(AtomicBool::new(false));
-                                    let attach = CanvasAttach {
-                                        canvas_id, surface_handle, logical_w, logical_h, render_w, render_h,
-                                        ml_info: None,
-                                    };
-                                    match build_attachment(hwnd, attach, pending_close.clone()) {
-                                        Ok(a) => {
-                                            unsafe { let _ = ShowWindow(hwnd, SW_SHOW); }
-                                            windows.push(MonitorWindow {
-                                                id: window_id,
-                                                hwnd,
-                                                owner_app_id: None,
-                                                pending_close,
-                                                in_frame,
-                                                attachment: Some(a),
-                                            });
-                                            set_window_title(hwnd, AttachState::Attached { canvas_id, ml: false });
-                                            println!("[desktop-monitor] re-created window {} for canvas {}", window_id, canvas_id);
-                                        }
-                                        Err(e) => {
-                                            unsafe { let _ = DestroyWindow(hwnd); }
-                                            eprintln!("[desktop-monitor] re-create window attach failed: {e}");
-                                        }
+
+                        // Check if the window exists and is NOT pending closure.
+                        if let Some(window) = windows.iter_mut().find(|w| w.id == window_id && !w.pending_close.load(Ordering::SeqCst)) {
+                            // Re-using the same HWND with DComp is tricky because CreateTargetForHwnd
+                            // fails with DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED. We should destroy
+                            // the old HWND and create a new one instead of trying to reuse it.
+                            window.pending_close.store(true, Ordering::SeqCst);
+                        }
+
+                        // Always create a fresh window to avoid DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED
+                        match create_monitor_hwnd() {
+                            Ok(hwnd) => {
+                                let pending_close = Arc::new(AtomicBool::new(false));
+                                let in_frame = Arc::new(AtomicBool::new(false));
+                                let attach = CanvasAttach {
+                                    canvas_id, surface_handle, logical_w, logical_h, render_w, render_h,
+                                    ml_info: None,
+                                };
+                                match build_attachment(hwnd, attach, pending_close.clone()) {
+                                    Ok(a) => {
+                                        unsafe { let _ = ShowWindow(hwnd, SW_SHOW); }
+                                        windows.push(MonitorWindow {
+                                            id: window_id,
+                                            hwnd,
+                                            owner_app_id: None,
+                                            pending_close,
+                                            in_frame,
+                                            attachment: Some(a),
+                                        });
+                                        set_window_title(hwnd, AttachState::Attached { canvas_id, ml: false });
+                                        println!("[desktop-monitor] re-created window {} for canvas {}", window_id, canvas_id);
+                                    }
+                                    Err(e) => {
+                                        unsafe { let _ = DestroyWindow(hwnd); }
+                                        eprintln!("[desktop-monitor] re-create window attach failed: {e}");
                                     }
                                 }
-                                Err(e) => eprintln!("[desktop-monitor] re-create window failed: {e}"),
                             }
+                            Err(e) => eprintln!("[desktop-monitor] re-create window failed: {e}"),
                         }
                     }
                     PipeEvent::Message { window_id, msg: ControlMessage::MonitorLocalSurfaceAttached {
@@ -802,7 +808,8 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                             "[desktop-monitor] MonitorLocalSurfaceAttached on window {}: canvas={} handle={:#x}",
                             window_id, canvas_id, surface_handle
                         );
-                        if let Some(window) = windows.iter_mut().find(|w| w.id == window_id) {
+                        // Make sure we only find the ACTIVE window (ignore those marked pending_close from re-creation).
+                        if let Some(window) = windows.iter_mut().find(|w| w.id == window_id && !w.pending_close.load(Ordering::SeqCst)) {
                             if let Some(ref mut att) = window.attachment {
                                 if att._canvas_id == canvas_id {
                                     match hot_attach_ml(att, surface_handle) {
@@ -821,7 +828,8 @@ async fn run_as_monitor_process(singleton_server: NamedPipeServer) -> anyhow::Re
                     }
                     PipeEvent::Disconnected { window_id, error } => {
                         eprintln!("[desktop-monitor] pipe read failed for window {}: {}", window_id, error);
-                        if let Some(window) = windows.iter_mut().find(|w| w.id == window_id) {
+                        // Only reconnect if this isn't a window we intentionally closed.
+                        if let Some(window) = windows.iter_mut().find(|w| w.id == window_id && !w.pending_close.load(Ordering::SeqCst)) {
                             if let Err(e) = reconnect_with_backoff(window, pipe_tx.clone()).await {
                                 eprintln!("[desktop-monitor] {e}");
                                 window.pending_close.store(true, Ordering::SeqCst);

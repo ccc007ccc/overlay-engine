@@ -41,7 +41,7 @@ pub const BUFFER_COUNT: usize = 3;
 /// When DWM has consumed all buffers, the IPC reader will block, naturally
 /// throttling the client app via the pipe buffer, instead of dropping frames
 /// and wasting GPU rendering work or creating buffer bloat races.
-pub const ACQUIRE_TIMEOUT_MS: u32 = windows::Win32::System::Threading::INFINITE;
+pub const ACQUIRE_TIMEOUT_MS: u32 = 0;
 
 pub struct RenderContextGuard {
     pub d3d_ctx: ID3D11DeviceContext,

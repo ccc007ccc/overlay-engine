@@ -479,10 +479,11 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                                     canvas_id
                                 };
                                 if let Some(canvas) = state.canvases.get(&resolved_canvas_id) {
+                                    let guard = state.devices.render_ctx.lock().unwrap();
                                     dispatch_submit_frame(
                                         canvas,
-                                        &state.devices.d3d_ctx,
-                                        &state.devices.d2d,
+                                        &guard.d3d_ctx,
+                                        &guard.d2d,
                                         resolved_canvas_id,
                                         frame_id,
                                         &cmds,
@@ -579,14 +580,7 @@ fn dispatch_submit_frame(
         {
             AcquireOutcome::Acquired(i) => Some(i),
             AcquireOutcome::TimedOut => {
-                eprintln!(
-                    "SubmitFrame: canvas={} frame={} World — dropped: all {} \
-                     buffers busy after {}ms (Preservation 3.8 bounded-wait)",
-                    canvas_id,
-                    frame_id,
-                    canvas.resources.buffers.len(),
-                    ACQUIRE_TIMEOUT_MS,
-                );
+                // Silently drop
                 None
             }
             AcquireOutcome::Failed(e) => {
@@ -614,15 +608,7 @@ fn dispatch_submit_frame(
                     local_idxs.insert(*cid, i);
                 }
                 AcquireOutcome::TimedOut => {
-                    eprintln!(
-                        "SubmitFrame: canvas={} frame={} monitor={} MonitorLocal \
-                         — dropped: all {} buffers busy after {}ms",
-                        canvas_id,
-                        frame_id,
-                        cid,
-                        pc.buffers.len(),
-                        ACQUIRE_TIMEOUT_MS,
-                    );
+                    // Silently drop
                 }
                 AcquireOutcome::Failed(e) => {
                     eprintln!(

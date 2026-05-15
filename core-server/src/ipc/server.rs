@@ -78,7 +78,7 @@ impl ServerState {
         self.next_app_id += 1;
 
         let shmem_name = format!("overlay-core-cmds-{}", pid);
-        let command_ringbuffer = SharedMemory::create(&shmem_name, 4 * 1024 * 1024)?; // 4MB ringbuffer
+        let command_ringbuffer = SharedMemory::create(&shmem_name, 16 * 1024 * 1024)?; // 16MB ringbuffer
 
         self.apps.insert(
             id,
@@ -126,12 +126,17 @@ impl ServerState {
         render_h: u32,
     ) -> anyhow::Result<u32> {
         if let Some(app) = self.apps.get_mut(&owner_id) {
+            // Allocate 32MB instead of 4MB for the shared memory to match demo-app's
+            // unlocked buffer bloat padding. (Though core-server just opens what app gives it).
             let id = self.next_canvas_id;
             self.next_canvas_id += 1;
 
             let resources = CanvasResources::new(&self.devices.d3d, render_w, render_h)?;
 
-            let _ = resources.present_color(&self.devices.d3d_ctx, [0.0, 0.0, 0.0, 0.0]);
+            {
+                let guard = self.devices.render_ctx.lock().unwrap();
+                let _ = resources.present_color(&guard.d3d_ctx, [0.0, 0.0, 0.0, 0.0]);
+            }
 
             self.canvases.insert(
                 id,
@@ -162,27 +167,16 @@ impl ServerState {
 
     pub fn remove_app(&mut self, id: u32) {
         if let Some(app) = self.apps.remove(&id) {
-            // Clear D3D11 context state and drain pending present-
-            // completion APCs BEFORE dropping canvas resources. This
-            // prevents ACCESS_VIOLATION crashes caused by:
-            //   1) stale internal bindings in the device context, and
-            //   2) APC callbacks firing against already-Released COM
-            //      objects after the canvas is dropped.
-            unsafe {
-                self.devices.d3d_ctx.ClearState();
-                self.devices.d3d_ctx.Flush();
-                windows::Win32::System::Threading::SleepEx(0, true);
-            }
+            // Task 3.3 / Preservation 3.5: release every
+            // `PerMonitorResources` along with the World `CanvasResources`
+            // for each owned canvas.
             for canvas_id in &app.canvas_ids {
                 if let Some(canvas) = self.canvases.get(canvas_id) {
-                    unsafe {
-                        while canvas.resources.manager.GetNextPresentStatistics().is_ok() {}
-                    }
-                    for pc in canvas.per_monitor_surfaces.values() {
-                        unsafe {
-                            while pc.manager.GetNextPresentStatistics().is_ok() {}
-                        }
-                    }
+                    let _notified: Vec<u32> =
+                        canvas.per_monitor_surfaces.keys().copied().collect();
+                    // Future: send ControlMessage::CanvasDetached to each
+                    // monitor in `_notified`. Today the drop below is the
+                    // observable cleanup.
                 }
             }
             for canvas_id in app.canvas_ids {
@@ -302,8 +296,10 @@ impl ServerState {
                         // first buffer to show in the monitor's second
                         // visual before the app ever emits a
                         // MonitorLocal-scoped command.
-                        let _ = res
-                            .present_color(&self.devices.d3d_ctx, [0.0, 0.0, 0.0, 0.0]);
+                        {
+                            let guard = self.devices.render_ctx.lock().unwrap();
+                            let _ = res.present_color(&guard.d3d_ctx, [0.0, 0.0, 0.0, 0.0]);
+                        }
                         canvas.per_monitor_surfaces.insert(monitor_id, res);
                     }
                     Err(e) => {

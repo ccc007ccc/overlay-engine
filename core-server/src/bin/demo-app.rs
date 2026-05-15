@@ -196,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("MapViewOfFile failed"));
     }
     let shmem_bytes =
-        unsafe { std::slice::from_raw_parts_mut(shmem_ptr.Value as *mut u8, 4 * 1024 * 1024) };
+        unsafe { std::slice::from_raw_parts_mut(shmem_ptr.Value as *mut u8, 16 * 1024 * 1024) };
     println!("[demo-app] 已打开共享内存: {}", shmem_name);
 
     // 持续渲染循环
@@ -214,7 +214,7 @@ async fn main() -> anyhow::Result<()> {
     // when running --unlocked. We advance the offset by 4KB each frame and
     // wrap around at 2MB.
     let mut current_offset: u32 = 24;
-    let max_offset: u32 = 2 * 1024 * 1024;
+    let max_offset: u32 = 14 * 1024 * 1024;
     let frame_max_size: u32 = 4096;
 
     loop {

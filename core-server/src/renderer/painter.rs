@@ -173,7 +173,7 @@ pub(crate) struct BitmapResource {
 }
 
 /// D2D + DWrite 全局引擎，跟 GpuDevice 一样长生命周期
-pub(crate) struct D2DEngine {
+pub struct D2DEngine {
     /// 用于创建 D2D Bitmap1（包装 D3D11 RT）
     #[allow(dead_code)]
     factory: ID2D1Factory1,
