@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
@@ -673,7 +674,14 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                     if let Some((id, true)) = client_id {
                         let canvas_id = {
                             let mut state = crate::ipc::server::SERVER_STATE.write();
-                            state.create_canvas(id, logical_w, logical_h, render_w, render_h)?
+                            state
+                                .create_canvas(id, logical_w, logical_h, render_w, render_h)
+                                .with_context(|| {
+                                    format!(
+                                        "CreateCanvas failed: app_id={} logical={}x{} render={}x{}",
+                                        id, logical_w, logical_h, render_w, render_h
+                                    )
+                                })?
                         };
                         println!("CreateCanvas created ID {} for App {}", canvas_id, id);
                     } else {

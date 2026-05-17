@@ -44,6 +44,10 @@ pub const BUFFER_COUNT: usize = 3;
 /// unlocked producers never build a deep pipe/shared-memory backlog.
 pub const ACQUIRE_TIMEOUT_MS: u32 = 0;
 
+fn annotate<T>(result: Result<T>, context: impl Into<String>) -> Result<T> {
+    result.map_err(|e| windows::core::Error::new(e.code(), format!("{}: {}", context.into(), e)))
+}
+
 pub struct RenderContextGuard {
     pub d3d_ctx: ID3D11DeviceContext,
     pub d2d: D2DEngine,
@@ -300,22 +304,38 @@ impl Drop for CanvasResources {
 
 impl CanvasResources {
     pub fn new(d3d: &ID3D11Device, render_w: u32, render_h: u32) -> Result<Self> {
-        let factory: IPresentationFactory = unsafe { CreatePresentationFactory(d3d)? };
-        let manager: IPresentationManager = unsafe { factory.CreatePresentationManager()? };
-        let handle = OwnedHandle::new(unsafe {
-            DCompositionCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, None)?
-        });
-        let surface: IPresentationSurface =
-            unsafe { manager.CreatePresentationSurface(handle.get())? };
+        let label = format!("CanvasResources::new render={}x{}", render_w, render_h);
+        let factory: IPresentationFactory = annotate(
+            unsafe { CreatePresentationFactory(d3d) },
+            format!("{label}: CreatePresentationFactory"),
+        )?;
+        let manager: IPresentationManager = annotate(
+            unsafe { factory.CreatePresentationManager() },
+            format!("{label}: CreatePresentationManager"),
+        )?;
+        let handle = OwnedHandle::new(annotate(
+            unsafe { DCompositionCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, None) },
+            format!("{label}: DCompositionCreateSurfaceHandle"),
+        )?);
+        let surface: IPresentationSurface = annotate(
+            unsafe { manager.CreatePresentationSurface(handle.get()) },
+            format!("{label}: CreatePresentationSurface"),
+        )?;
         unsafe {
-            surface.SetAlphaMode(DXGI_ALPHA_MODE_PREMULTIPLIED)?;
+            annotate(
+                surface.SetAlphaMode(DXGI_ALPHA_MODE_PREMULTIPLIED),
+                format!("{label}: SetAlphaMode"),
+            )?;
             let src = RECT {
                 left: 0,
                 top: 0,
                 right: render_w as i32,
                 bottom: render_h as i32,
             };
-            surface.SetSourceRect(&src)?;
+            annotate(
+                surface.SetSourceRect(&src),
+                format!("{label}: SetSourceRect"),
+            )?;
         }
 
         let misc_flags = D3D11_RESOURCE_MISC_SHARED.0
@@ -342,26 +362,43 @@ impl CanvasResources {
         let mut buffers: Vec<IPresentationBuffer> = Vec::with_capacity(BUFFER_COUNT);
         let mut available_events = OwnedEventHandles::with_capacity(BUFFER_COUNT);
 
-        for _ in 0..BUFFER_COUNT {
+        for idx in 0..BUFFER_COUNT {
             let mut texture: Option<ID3D11Texture2D> = None;
-            unsafe { d3d.CreateTexture2D(&desc, None, Some(&mut texture))? };
+            annotate(
+                unsafe { d3d.CreateTexture2D(&desc, None, Some(&mut texture)) },
+                format!("{label}: CreateTexture2D buffer={idx}"),
+            )?;
             let texture = texture.ok_or_else(|| {
-                windows::core::Error::new(windows::core::HRESULT(-1), "CreateTexture2D failed")
-            })?;
-
-            let mut rtv: Option<ID3D11RenderTargetView> = None;
-            unsafe { d3d.CreateRenderTargetView(&texture, None, Some(&mut rtv))? };
-            let rtv = rtv.ok_or_else(|| {
                 windows::core::Error::new(
                     windows::core::HRESULT(-1),
-                    "CreateRenderTargetView failed",
+                    "CreateTexture2D returned no texture",
                 )
             })?;
 
-            let texture_unk: IUnknown = texture.cast()?;
-            let buffer: IPresentationBuffer =
-                unsafe { manager.AddBufferFromResource(&texture_unk)? };
-            let ev = unsafe { buffer.GetAvailableEvent()? };
+            let mut rtv: Option<ID3D11RenderTargetView> = None;
+            annotate(
+                unsafe { d3d.CreateRenderTargetView(&texture, None, Some(&mut rtv)) },
+                format!("{label}: CreateRenderTargetView buffer={idx}"),
+            )?;
+            let rtv = rtv.ok_or_else(|| {
+                windows::core::Error::new(
+                    windows::core::HRESULT(-1),
+                    "CreateRenderTargetView returned no view",
+                )
+            })?;
+
+            let texture_unk: IUnknown = annotate(
+                texture.cast(),
+                format!("{label}: cast texture to IUnknown buffer={idx}"),
+            )?;
+            let buffer: IPresentationBuffer = annotate(
+                unsafe { manager.AddBufferFromResource(&texture_unk) },
+                format!("{label}: AddBufferFromResource buffer={idx}"),
+            )?;
+            let ev = annotate(
+                unsafe { buffer.GetAvailableEvent() },
+                format!("{label}: GetAvailableEvent buffer={idx}"),
+            )?;
 
             textures.push(texture);
             rtvs.push(rtv);
@@ -524,23 +561,42 @@ impl PerMonitorResources {
     pub fn new(d3d: &ID3D11Device, logical_w: u32, logical_h: u32) -> Result<Self> {
         let render_w = logical_w.clamp(PER_MONITOR_MIN_DIM, PER_MONITOR_MAX_DIM);
         let render_h = logical_h.clamp(PER_MONITOR_MIN_DIM, PER_MONITOR_MAX_DIM);
+        let label = format!(
+            "PerMonitorResources::new logical={}x{} render={}x{}",
+            logical_w, logical_h, render_w, render_h
+        );
 
-        let factory: IPresentationFactory = unsafe { CreatePresentationFactory(d3d)? };
-        let manager: IPresentationManager = unsafe { factory.CreatePresentationManager()? };
-        let handle = OwnedHandle::new(unsafe {
-            DCompositionCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, None)?
-        });
-        let surface: IPresentationSurface =
-            unsafe { manager.CreatePresentationSurface(handle.get())? };
+        let factory: IPresentationFactory = annotate(
+            unsafe { CreatePresentationFactory(d3d) },
+            format!("{label}: CreatePresentationFactory"),
+        )?;
+        let manager: IPresentationManager = annotate(
+            unsafe { factory.CreatePresentationManager() },
+            format!("{label}: CreatePresentationManager"),
+        )?;
+        let handle = OwnedHandle::new(annotate(
+            unsafe { DCompositionCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, None) },
+            format!("{label}: DCompositionCreateSurfaceHandle"),
+        )?);
+        let surface: IPresentationSurface = annotate(
+            unsafe { manager.CreatePresentationSurface(handle.get()) },
+            format!("{label}: CreatePresentationSurface"),
+        )?;
         unsafe {
-            surface.SetAlphaMode(DXGI_ALPHA_MODE_PREMULTIPLIED)?;
+            annotate(
+                surface.SetAlphaMode(DXGI_ALPHA_MODE_PREMULTIPLIED),
+                format!("{label}: SetAlphaMode"),
+            )?;
             let src = RECT {
                 left: 0,
                 top: 0,
                 right: render_w as i32,
                 bottom: render_h as i32,
             };
-            surface.SetSourceRect(&src)?;
+            annotate(
+                surface.SetSourceRect(&src),
+                format!("{label}: SetSourceRect"),
+            )?;
         }
 
         let misc_flags = D3D11_RESOURCE_MISC_SHARED.0
@@ -567,29 +623,43 @@ impl PerMonitorResources {
         let mut buffers: Vec<IPresentationBuffer> = Vec::with_capacity(BUFFER_COUNT);
         let mut available_events = OwnedEventHandles::with_capacity(BUFFER_COUNT);
 
-        for _ in 0..BUFFER_COUNT {
+        for idx in 0..BUFFER_COUNT {
             let mut texture: Option<ID3D11Texture2D> = None;
-            unsafe { d3d.CreateTexture2D(&desc, None, Some(&mut texture))? };
+            annotate(
+                unsafe { d3d.CreateTexture2D(&desc, None, Some(&mut texture)) },
+                format!("{label}: CreateTexture2D buffer={idx}"),
+            )?;
             let texture = texture.ok_or_else(|| {
                 windows::core::Error::new(
                     windows::core::HRESULT(-1),
-                    "CreateTexture2D (per-monitor) failed",
+                    "CreateTexture2D (per-monitor) returned no texture",
                 )
             })?;
 
             let mut rtv: Option<ID3D11RenderTargetView> = None;
-            unsafe { d3d.CreateRenderTargetView(&texture, None, Some(&mut rtv))? };
+            annotate(
+                unsafe { d3d.CreateRenderTargetView(&texture, None, Some(&mut rtv)) },
+                format!("{label}: CreateRenderTargetView buffer={idx}"),
+            )?;
             let rtv = rtv.ok_or_else(|| {
                 windows::core::Error::new(
                     windows::core::HRESULT(-1),
-                    "CreateRenderTargetView (per-monitor) failed",
+                    "CreateRenderTargetView (per-monitor) returned no view",
                 )
             })?;
 
-            let texture_unk: IUnknown = texture.cast()?;
-            let buffer: IPresentationBuffer =
-                unsafe { manager.AddBufferFromResource(&texture_unk)? };
-            let ev = unsafe { buffer.GetAvailableEvent()? };
+            let texture_unk: IUnknown = annotate(
+                texture.cast(),
+                format!("{label}: cast texture to IUnknown buffer={idx}"),
+            )?;
+            let buffer: IPresentationBuffer = annotate(
+                unsafe { manager.AddBufferFromResource(&texture_unk) },
+                format!("{label}: AddBufferFromResource buffer={idx}"),
+            )?;
+            let ev = annotate(
+                unsafe { buffer.GetAvailableEvent() },
+                format!("{label}: GetAvailableEvent buffer={idx}"),
+            )?;
 
             textures.push(texture);
             rtvs.push(rtv);
