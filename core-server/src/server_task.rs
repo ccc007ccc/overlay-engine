@@ -144,7 +144,7 @@ pub async fn run_server() -> anyhow::Result<()> {
         // Spawn a new task to handle the connected client
         tokio::spawn(async move {
             if let Err(e) = handle_client(connected_client).await {
-                eprintln!("Client error: {}", e);
+                eprintln!("Client error: {:#}", e);
             }
         });
     }
