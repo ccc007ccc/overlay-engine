@@ -97,11 +97,7 @@ fn create_presentation_texture(
     let desc = presentation_texture_desc(render_w, render_h, PRESENTATION_TEXTURE_MISC_FLAGS);
     match unsafe { d3d.CreateTexture2D(&desc, None, Some(&mut texture)) } {
         Ok(()) => return created_texture(texture),
-        Err(e) if e.code() == E_INVALIDARG => {
-            eprintln!(
-                "{label}: CreateTexture2D buffer={idx} rejected SHARED_DISPLAYABLE ({e}); retrying without it"
-            );
-        }
+        Err(e) if e.code() == E_INVALIDARG => {}
         Err(e) => {
             return Err(windows::core::Error::new(
                 e.code(),
