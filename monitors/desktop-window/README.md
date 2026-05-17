@@ -74,8 +74,8 @@ cargo build --release -p core-server -p desktop-window-monitor
 # Terminal 1: Core
 .\target\release\core-server.exe
 
-# Terminal 2: Demo App requests two Desktop windows
-.\target\release\demo-app.exe --desktop-monitors 2 --window-mode bordered
+# Terminal 2: Demo App requests three Desktop windows by default
+.\target\release\demo-app.exe
 ```
 
 可用窗口模式：

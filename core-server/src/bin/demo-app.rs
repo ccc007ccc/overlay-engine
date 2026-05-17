@@ -47,7 +47,7 @@ impl Default for DemoOptions {
     fn default() -> Self {
         Self {
             unlocked: false,
-            desktop_monitors: 0,
+            desktop_monitors: 3,
             window_mode: DesktopWindowMode::Bordered,
             click_through: false,
         }
@@ -102,6 +102,7 @@ fn window_mode_label(mode: DesktopWindowMode) -> &'static str {
 
 fn print_usage() {
     println!("Usage: demo-app [--unlocked] [--desktop-monitors N] [--window-mode bordered|borderless|fullscreen] [--click-through]");
+    println!("Default: --desktop-monitors 3 --window-mode bordered");
 }
 
 async fn send_control_message<W: AsyncWrite + Unpin>(
