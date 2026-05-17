@@ -93,6 +93,10 @@ fn ensure_oracle_dir() {
     }
 }
 
+fn normalize_text_oracle(content: &str) -> String {
+    content.replace("\r\n", "\n")
+}
+
 /// Capture-or-verify for text oracles. On missing file, write `content` and
 /// return `Ok(())`. On existing file, assert equality.
 fn capture_or_verify_text(path: &Path, content: &str) {
@@ -105,6 +109,8 @@ fn capture_or_verify_text(path: &Path, content: &str) {
         let on_disk = fs::read_to_string(path).unwrap_or_else(|e| {
             panic!("failed to read oracle {:?}: {e}", path);
         });
+        let on_disk = normalize_text_oracle(&on_disk);
+        let content = normalize_text_oracle(content);
         assert_eq!(
             on_disk, content,
             "preservation regression: oracle {:?} differs from observed output",

@@ -48,6 +48,78 @@ fn annotate<T>(result: Result<T>, context: impl Into<String>) -> Result<T> {
     result.map_err(|e| windows::core::Error::new(e.code(), format!("{}: {}", context.into(), e)))
 }
 
+const E_INVALIDARG: windows::core::HRESULT = windows::core::HRESULT(0x80070057u32 as i32);
+const PRESENTATION_TEXTURE_MISC_FLAGS: u32 = (D3D11_RESOURCE_MISC_SHARED.0
+    | D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0
+    | D3D11_RESOURCE_MISC_SHARED_DISPLAYABLE.0) as u32;
+const PRESENTATION_TEXTURE_FALLBACK_MISC_FLAGS: u32 =
+    (D3D11_RESOURCE_MISC_SHARED.0 | D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0) as u32;
+
+fn presentation_texture_desc(
+    render_w: u32,
+    render_h: u32,
+    misc_flags: u32,
+) -> D3D11_TEXTURE2D_DESC {
+    D3D11_TEXTURE2D_DESC {
+        Width: render_w,
+        Height: render_h,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: misc_flags,
+    }
+}
+
+fn created_texture(texture: Option<ID3D11Texture2D>) -> Result<ID3D11Texture2D> {
+    texture.ok_or_else(|| {
+        windows::core::Error::new(
+            windows::core::HRESULT(-1),
+            "CreateTexture2D returned no texture",
+        )
+    })
+}
+
+fn create_presentation_texture(
+    d3d: &ID3D11Device,
+    render_w: u32,
+    render_h: u32,
+    label: &str,
+    idx: usize,
+) -> Result<ID3D11Texture2D> {
+    let mut texture: Option<ID3D11Texture2D> = None;
+    let desc = presentation_texture_desc(render_w, render_h, PRESENTATION_TEXTURE_MISC_FLAGS);
+    match unsafe { d3d.CreateTexture2D(&desc, None, Some(&mut texture)) } {
+        Ok(()) => return created_texture(texture),
+        Err(e) if e.code() == E_INVALIDARG => {
+            eprintln!(
+                "{label}: CreateTexture2D buffer={idx} rejected SHARED_DISPLAYABLE ({e}); retrying without it"
+            );
+        }
+        Err(e) => {
+            return Err(windows::core::Error::new(
+                e.code(),
+                format!("{label}: CreateTexture2D buffer={idx}: {e}"),
+            ));
+        }
+    }
+
+    let mut texture: Option<ID3D11Texture2D> = None;
+    let desc =
+        presentation_texture_desc(render_w, render_h, PRESENTATION_TEXTURE_FALLBACK_MISC_FLAGS);
+    annotate(
+        unsafe { d3d.CreateTexture2D(&desc, None, Some(&mut texture)) },
+        format!("{label}: CreateTexture2D buffer={idx} without SHARED_DISPLAYABLE"),
+    )?;
+    created_texture(texture)
+}
+
 pub struct RenderContextGuard {
     pub d3d_ctx: ID3D11DeviceContext,
     pub d2d: D2DEngine,
@@ -338,42 +410,13 @@ impl CanvasResources {
             )?;
         }
 
-        let misc_flags = D3D11_RESOURCE_MISC_SHARED.0
-            | D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0
-            | D3D11_RESOURCE_MISC_SHARED_DISPLAYABLE.0;
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: render_w,
-            Height: render_h,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: misc_flags as u32,
-        };
-
         let mut textures: Vec<ID3D11Texture2D> = Vec::with_capacity(BUFFER_COUNT);
         let mut rtvs: Vec<ID3D11RenderTargetView> = Vec::with_capacity(BUFFER_COUNT);
         let mut buffers: Vec<IPresentationBuffer> = Vec::with_capacity(BUFFER_COUNT);
         let mut available_events = OwnedEventHandles::with_capacity(BUFFER_COUNT);
 
         for idx in 0..BUFFER_COUNT {
-            let mut texture: Option<ID3D11Texture2D> = None;
-            annotate(
-                unsafe { d3d.CreateTexture2D(&desc, None, Some(&mut texture)) },
-                format!("{label}: CreateTexture2D buffer={idx}"),
-            )?;
-            let texture = texture.ok_or_else(|| {
-                windows::core::Error::new(
-                    windows::core::HRESULT(-1),
-                    "CreateTexture2D returned no texture",
-                )
-            })?;
+            let texture = create_presentation_texture(d3d, render_w, render_h, &label, idx)?;
 
             let mut rtv: Option<ID3D11RenderTargetView> = None;
             annotate(
@@ -599,42 +642,13 @@ impl PerMonitorResources {
             )?;
         }
 
-        let misc_flags = D3D11_RESOURCE_MISC_SHARED.0
-            | D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0
-            | D3D11_RESOURCE_MISC_SHARED_DISPLAYABLE.0;
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: render_w,
-            Height: render_h,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: misc_flags as u32,
-        };
-
         let mut textures: Vec<ID3D11Texture2D> = Vec::with_capacity(BUFFER_COUNT);
         let mut rtvs: Vec<ID3D11RenderTargetView> = Vec::with_capacity(BUFFER_COUNT);
         let mut buffers: Vec<IPresentationBuffer> = Vec::with_capacity(BUFFER_COUNT);
         let mut available_events = OwnedEventHandles::with_capacity(BUFFER_COUNT);
 
         for idx in 0..BUFFER_COUNT {
-            let mut texture: Option<ID3D11Texture2D> = None;
-            annotate(
-                unsafe { d3d.CreateTexture2D(&desc, None, Some(&mut texture)) },
-                format!("{label}: CreateTexture2D buffer={idx}"),
-            )?;
-            let texture = texture.ok_or_else(|| {
-                windows::core::Error::new(
-                    windows::core::HRESULT(-1),
-                    "CreateTexture2D (per-monitor) returned no texture",
-                )
-            })?;
+            let texture = create_presentation_texture(d3d, render_w, render_h, &label, idx)?;
 
             let mut rtv: Option<ID3D11RenderTargetView> = None;
             annotate(
