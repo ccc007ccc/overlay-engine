@@ -10,6 +10,7 @@ resolver = "2"
 members = [
     "rust-renderer",
     "monitors/desktop-window", "core-server",
+    "build-support/windows-icon-build",
 ]
 
 [profile.release]

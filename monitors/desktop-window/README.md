@@ -42,7 +42,7 @@ Core:
   SetBuffer + Present
 
 Monitor:
-  RegisterMonitorV2 (Core-requested) / RegisterMonitor (manual dev)
+  RegisterMonitor(kind/owner_app_id/request_id/target_canvas_id/mode/flags/manual_lifecycle)
   recv CanvasAttached / MonitorLocalSurfaceAttached
   dcomp.CreateSurfaceFromHandle(handle)
   visual.SetContent(wrapper IUnknown)

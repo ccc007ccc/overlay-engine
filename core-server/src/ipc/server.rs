@@ -56,7 +56,6 @@ pub struct Monitor {
     pub manual_lifecycle: bool,
     pub mode: DesktopWindowMode,
     pub flags: u32,
-    pub auto_attach: bool,
 }
 
 pub struct ServerState {
@@ -113,43 +112,6 @@ impl ServerState {
         pid: u32,
         handle: HANDLE,
         tx: tokio::sync::mpsc::UnboundedSender<ControlMessage>,
-    ) -> u32 {
-        let id = self.next_monitor_id;
-        self.next_monitor_id += 1;
-        self.monitors.insert(
-            id,
-            Monitor {
-                id,
-                pid,
-                handle,
-                tx,
-                kind: MonitorKind::DesktopWindow,
-                owner_app_id: None,
-                target_canvas_id: None,
-                start_request_id: None,
-                core_managed: false,
-                manual_lifecycle: false,
-                mode: DesktopWindowMode::Bordered,
-                flags: 0,
-                auto_attach: true,
-            },
-        );
-
-        let canvas_ids: Vec<u32> = self.canvases.keys().copied().collect();
-        for cid in canvas_ids {
-            if let Err(e) = self.attach_monitor(cid, id) {
-                eprintln!("auto-attach monitor {} to canvas {} failed: {}", id, cid, e);
-            }
-        }
-
-        id
-    }
-
-    pub fn register_monitor_v2(
-        &mut self,
-        pid: u32,
-        handle: HANDLE,
-        tx: tokio::sync::mpsc::UnboundedSender<ControlMessage>,
         kind: MonitorKind,
         owner_app_id: Option<u32>,
         request_id: Option<u32>,
@@ -160,7 +122,6 @@ impl ServerState {
     ) -> (u32, bool) {
         let id = self.next_monitor_id;
         self.next_monitor_id += 1;
-        let auto_attach = kind == MonitorKind::GameBar || owner_app_id.is_none();
         let core_managed =
             kind == MonitorKind::DesktopWindow && owner_app_id.is_some() && !manual_lifecycle;
         self.monitors.insert(
@@ -178,33 +139,31 @@ impl ServerState {
                 manual_lifecycle,
                 mode,
                 flags,
-                auto_attach,
             },
         );
 
-        if kind == MonitorKind::DesktopWindow {
-            if let (Some(app_id), Some(canvas_id)) = (owner_app_id, target_canvas_id) {
+        let Some(app_id) = owner_app_id else {
+            return (id, false);
+        };
+        if !self.apps.contains_key(&app_id) {
+            return (id, true);
+        }
+
+        match target_canvas_id {
+            Some(canvas_id) => {
                 if !self.app_owns_canvas(app_id, canvas_id) {
                     return (id, true);
                 }
                 if let Err(e) = self.attach_monitor(canvas_id, id) {
                     eprintln!(
-                        "attach Desktop monitor {} to canvas {} failed: {}",
+                        "attach monitor {} to canvas {} failed: {}",
                         id, canvas_id, e
                     );
                     return (id, true);
                 }
-                return (id, false);
             }
-        }
-
-        if auto_attach {
-            let canvas_ids: Vec<u32> = self.canvases.keys().copied().collect();
-            for cid in canvas_ids {
-                if let Err(e) = self.attach_monitor(cid, id) {
-                    eprintln!("auto-attach monitor {} to canvas {} failed: {}", id, cid, e);
-                }
-            }
+            None if core_managed => return (id, true),
+            None => {}
         }
 
         (id, false)
@@ -245,17 +204,6 @@ impl ServerState {
             );
             app.canvas_ids.push(id);
 
-            let monitor_ids: Vec<u32> = self
-                .monitors
-                .iter()
-                .filter_map(|(monitor_id, monitor)| monitor.auto_attach.then_some(*monitor_id))
-                .collect();
-            for cid in monitor_ids {
-                if let Err(e) = self.attach_monitor(id, cid) {
-                    eprintln!("auto-attach monitor {} to canvas {} failed: {}", cid, id, e);
-                }
-            }
-
             Ok(id)
         } else {
             Err(anyhow::anyhow!("App not found"))
@@ -277,6 +225,76 @@ impl ServerState {
             self.app_owns_canvas(app_id, requested_canvas_id)
                 .then_some(requested_canvas_id)
         }
+    }
+
+    pub fn attach_game_bar_monitor_for_app(
+        &mut self,
+        app_id: u32,
+        requested_canvas_id: u32,
+        count: u32,
+    ) -> (crate::ipc::protocol::MonitorRequestStatus, Vec<u32>) {
+        let Some(canvas_id) = self.resolve_app_canvas_id(app_id, requested_canvas_id) else {
+            return (
+                crate::ipc::protocol::MonitorRequestStatus::InvalidCanvas,
+                Vec::new(),
+            );
+        };
+
+        let candidates: Vec<u32> = self
+            .monitors
+            .iter()
+            .filter_map(|(id, monitor)| {
+                (monitor.kind == MonitorKind::GameBar
+                    && monitor.owner_app_id.is_none()
+                    && monitor.manual_lifecycle
+                    && !self.monitor_attached_to_any_canvas(*id))
+                .then_some(*id)
+            })
+            .take(count as usize)
+            .collect();
+
+        if candidates.is_empty() {
+            let has_busy_game_bar = self.monitors.iter().any(|(id, monitor)| {
+                monitor.kind == MonitorKind::GameBar
+                    && monitor.owner_app_id.is_none()
+                    && monitor.manual_lifecycle
+                    && self.monitor_attached_to_any_canvas(*id)
+            });
+            return (
+                if has_busy_game_bar {
+                    crate::ipc::protocol::MonitorRequestStatus::LimitExceeded
+                } else {
+                    crate::ipc::protocol::MonitorRequestStatus::ManualOpenRequired
+                },
+                Vec::new(),
+            );
+        }
+
+        let mut attached = Vec::new();
+        for monitor_id in candidates {
+            match self.attach_monitor(canvas_id, monitor_id) {
+                Ok(()) => attached.push(monitor_id),
+                Err(e) => eprintln!(
+                    "attach Game Bar monitor {} to canvas {} failed: {}",
+                    monitor_id, canvas_id, e
+                ),
+            }
+        }
+
+        if attached.is_empty() {
+            (
+                crate::ipc::protocol::MonitorRequestStatus::SpawnFailed,
+                Vec::new(),
+            )
+        } else {
+            (crate::ipc::protocol::MonitorRequestStatus::Ok, attached)
+        }
+    }
+
+    fn monitor_attached_to_any_canvas(&self, monitor_id: u32) -> bool {
+        self.canvases
+            .values()
+            .any(|canvas| canvas.attached_monitor_ids.contains(&monitor_id))
     }
 
     pub fn close_owned_desktop_monitors(
@@ -354,6 +372,34 @@ impl ServerState {
             canvas.attached_monitor_ids.remove(&id);
         }
         self.monitors.remove(&id);
+    }
+
+    pub fn attach_monitor_for_app(
+        &mut self,
+        app_id: u32,
+        canvas_id: u32,
+        monitor_id: u32,
+    ) -> anyhow::Result<()> {
+        if !self.app_owns_canvas(app_id, canvas_id) {
+            anyhow::bail!("App {app_id} does not own Canvas {canvas_id}");
+        }
+
+        let monitor = self
+            .monitors
+            .get(&monitor_id)
+            .ok_or_else(|| anyhow::anyhow!("Monitor not found"))?;
+        if monitor.owner_app_id != Some(app_id) {
+            anyhow::bail!("App {app_id} does not own Monitor {monitor_id}");
+        }
+        if let Some(target_canvas_id) = monitor.target_canvas_id {
+            if target_canvas_id != canvas_id {
+                anyhow::bail!(
+                    "Monitor {monitor_id} targets Canvas {target_canvas_id}, not Canvas {canvas_id}"
+                );
+            }
+        }
+
+        self.attach_monitor(canvas_id, monitor_id)
     }
 
     pub fn attach_monitor(&mut self, canvas_id: u32, monitor_id: u32) -> anyhow::Result<()> {
@@ -531,9 +577,9 @@ impl ServerState {
             return Ok(());
         }
 
-        // Send MonitorLocalSurfaceAttached immediately after
-        // CanvasAttached. Scheme α: this is a NEW opcode; monitors that
-        // don't recognize it ignore it via the unknown-opcode downgrade.
+        // Send MonitorLocalSurfaceAttached immediately after CanvasAttached.
+        // It is part of the current protocol; protocol drift is rejected by
+        // the decoder instead of silently downgrading.
         let ml_msg = crate::ipc::protocol::ControlMessage::MonitorLocalSurfaceAttached {
             canvas_id,
             monitor_id,
@@ -549,5 +595,7 @@ impl ServerState {
 
 // Global server state wrapped in an RwLock.
 lazy_static::lazy_static! {
-    pub static ref SERVER_STATE: RwLock<ServerState> = RwLock::new(ServerState::new().expect("Failed to initialize ServerState"));
+    pub static ref SERVER_STATE: RwLock<ServerState> = RwLock::new(
+        ServerState::new().expect("Failed to initialize ServerState")
+    );
 }

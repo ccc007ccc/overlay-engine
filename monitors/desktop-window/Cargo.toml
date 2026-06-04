@@ -43,5 +43,8 @@ tokio = { version = "1", features = ["full"] }
 bytes = "1.5"
 anyhow = "1.0"
 
+[build-dependencies]
+windows-icon-build = { path = "../../build-support/windows-icon-build" }
+
 [dev-dependencies]
 proptest = "1.5"

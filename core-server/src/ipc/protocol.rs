@@ -75,8 +75,7 @@ pub const OP_START_MONITOR: u16 = 0x000C;
 pub const OP_START_MONITOR_RESULT: u16 = 0x000D;
 pub const OP_STOP_MONITOR: u16 = 0x000E;
 pub const OP_STOP_MONITOR_RESULT: u16 = 0x000F;
-pub const OP_REGISTER_MONITOR_V2: u16 = 0x0010;
-pub const OP_CLOSE_MONITOR: u16 = 0x0011;
+pub const OP_CLOSE_MONITOR: u16 = 0x0010;
 
 pub const DESKTOP_WINDOW_MODE_BORDERED: u32 = 1 << 0;
 pub const DESKTOP_WINDOW_MODE_BORDERLESS: u32 = 1 << 1;
@@ -224,6 +223,13 @@ pub enum ControlMessage {
     },
     RegisterMonitor {
         pid: u32,
+        kind: MonitorKind,
+        owner_app_id: u32,
+        request_id: u32,
+        target_canvas_id: u32,
+        mode: DesktopWindowMode,
+        flags: u32,
+        manual_lifecycle: bool,
     },
     CreateCanvas {
         logical_w: u32,
@@ -296,16 +302,6 @@ pub enum ControlMessage {
         request_id: u32,
         status: MonitorRequestStatus,
     },
-    RegisterMonitorV2 {
-        pid: u32,
-        kind: MonitorKind,
-        owner_app_id: u32,
-        request_id: u32,
-        target_canvas_id: u32,
-        mode: DesktopWindowMode,
-        flags: u32,
-        manual_lifecycle: bool,
-    },
     CloseMonitor {
         monitor_id: u32,
     },
@@ -313,7 +309,8 @@ pub enum ControlMessage {
 
 fn fixed_payload_len(opcode: u16) -> Option<usize> {
     match opcode {
-        OP_REGISTER_APP | OP_REGISTER_MONITOR | OP_LIST_MONITOR_TYPES | OP_CLOSE_MONITOR => Some(4),
+        OP_REGISTER_APP | OP_LIST_MONITOR_TYPES | OP_CLOSE_MONITOR => Some(4),
+        OP_REGISTER_MONITOR => Some(23),
         OP_CREATE_CANVAS => Some(16),
         OP_ATTACH_MONITOR | OP_STOP_MONITOR => Some(8),
         OP_CANVAS_ATTACHED => Some(28),
@@ -321,7 +318,6 @@ fn fixed_payload_len(opcode: u16) -> Option<usize> {
         OP_MONITOR_LOCAL_SURFACE_ATTACHED => Some(24),
         OP_APP_DETACHED | OP_STOP_MONITOR_RESULT => Some(5),
         OP_START_MONITOR => Some(34),
-        OP_REGISTER_MONITOR_V2 => Some(23),
         _ => None,
     }
 }
@@ -344,16 +340,35 @@ impl ControlMessage {
             Self::StartMonitorResult { .. } => OP_START_MONITOR_RESULT,
             Self::StopMonitor { .. } => OP_STOP_MONITOR,
             Self::StopMonitorResult { .. } => OP_STOP_MONITOR_RESULT,
-            Self::RegisterMonitorV2 { .. } => OP_REGISTER_MONITOR_V2,
             Self::CloseMonitor { .. } => OP_CLOSE_MONITOR,
         }
     }
 
     pub fn encode(&self, buf: &mut BytesMut) {
         match self {
-            Self::RegisterApp { pid } | Self::RegisterMonitor { pid } => {
+            Self::RegisterApp { pid } => {
                 encode_header(self.opcode(), 4, buf);
                 buf.put_u32_le(*pid);
+            }
+            Self::RegisterMonitor {
+                pid,
+                kind,
+                owner_app_id,
+                request_id,
+                target_canvas_id,
+                mode,
+                flags,
+                manual_lifecycle,
+            } => {
+                encode_header(self.opcode(), 23, buf);
+                buf.put_u32_le(*pid);
+                buf.put_u8(*kind as u8);
+                buf.put_u32_le(*owner_app_id);
+                buf.put_u32_le(*request_id);
+                buf.put_u32_le(*target_canvas_id);
+                buf.put_u8(*mode as u8);
+                buf.put_u32_le(*flags);
+                buf.put_u8(*manual_lifecycle as u8);
             }
             Self::CreateCanvas {
                 logical_w,
@@ -501,26 +516,6 @@ impl ControlMessage {
                 buf.put_u32_le(*request_id);
                 buf.put_u8(*status as u8);
             }
-            Self::RegisterMonitorV2 {
-                pid,
-                kind,
-                owner_app_id,
-                request_id,
-                target_canvas_id,
-                mode,
-                flags,
-                manual_lifecycle,
-            } => {
-                encode_header(self.opcode(), 23, buf);
-                buf.put_u32_le(*pid);
-                buf.put_u8(*kind as u8);
-                buf.put_u32_le(*owner_app_id);
-                buf.put_u32_le(*request_id);
-                buf.put_u32_le(*target_canvas_id);
-                buf.put_u8(*mode as u8);
-                buf.put_u32_le(*flags);
-                buf.put_u8(*manual_lifecycle as u8);
-            }
             Self::CloseMonitor { monitor_id } => {
                 encode_header(self.opcode(), 4, buf);
                 buf.put_u32_le(*monitor_id);
@@ -532,7 +527,7 @@ impl ControlMessage {
         opcode: u16,
         payload_len: u32,
         buf: &mut BytesMut,
-    ) -> Result<Option<Self>, ProtocolError> {
+    ) -> Result<Self, ProtocolError> {
         let payload_len = payload_len as usize;
         if let Some(expected) = fixed_payload_len(opcode) {
             if payload_len != expected {
@@ -547,47 +542,54 @@ impl ControlMessage {
         }
 
         match opcode {
-            OP_REGISTER_APP => Ok(Some(Self::RegisterApp {
+            OP_REGISTER_APP => Ok(Self::RegisterApp {
                 pid: buf.get_u32_le(),
-            })),
-            OP_REGISTER_MONITOR => Ok(Some(Self::RegisterMonitor {
+            }),
+            OP_REGISTER_MONITOR => Ok(Self::RegisterMonitor {
                 pid: buf.get_u32_le(),
-            })),
-            OP_CREATE_CANVAS => Ok(Some(Self::CreateCanvas {
+                kind: MonitorKind::from_wire(buf.get_u8())?,
+                owner_app_id: buf.get_u32_le(),
+                request_id: buf.get_u32_le(),
+                target_canvas_id: buf.get_u32_le(),
+                mode: DesktopWindowMode::from_wire(buf.get_u8())?,
+                flags: buf.get_u32_le(),
+                manual_lifecycle: buf.get_u8() != 0,
+            }),
+            OP_CREATE_CANVAS => Ok(Self::CreateCanvas {
                 logical_w: buf.get_u32_le(),
                 logical_h: buf.get_u32_le(),
                 render_w: buf.get_u32_le(),
                 render_h: buf.get_u32_le(),
-            })),
-            OP_ATTACH_MONITOR => Ok(Some(Self::AttachMonitor {
+            }),
+            OP_ATTACH_MONITOR => Ok(Self::AttachMonitor {
                 canvas_id: buf.get_u32_le(),
                 monitor_id: buf.get_u32_le(),
-            })),
-            OP_CANVAS_ATTACHED => Ok(Some(Self::CanvasAttached {
+            }),
+            OP_CANVAS_ATTACHED => Ok(Self::CanvasAttached {
                 canvas_id: buf.get_u32_le(),
                 surface_handle: buf.get_u64_le(),
                 logical_w: buf.get_u32_le(),
                 logical_h: buf.get_u32_le(),
                 render_w: buf.get_u32_le(),
                 render_h: buf.get_u32_le(),
-            })),
-            OP_SUBMIT_FRAME => Ok(Some(Self::SubmitFrame {
+            }),
+            OP_SUBMIT_FRAME => Ok(Self::SubmitFrame {
                 canvas_id: buf.get_u32_le(),
                 frame_id: buf.get_u64_le(),
                 offset: buf.get_u32_le(),
                 length: buf.get_u32_le(),
-            })),
-            OP_MONITOR_LOCAL_SURFACE_ATTACHED => Ok(Some(Self::MonitorLocalSurfaceAttached {
+            }),
+            OP_MONITOR_LOCAL_SURFACE_ATTACHED => Ok(Self::MonitorLocalSurfaceAttached {
                 canvas_id: buf.get_u32_le(),
                 monitor_id: buf.get_u32_le(),
                 surface_handle: buf.get_u64_le(),
                 logical_w: buf.get_u32_le(),
                 logical_h: buf.get_u32_le(),
-            })),
-            OP_APP_DETACHED => Ok(Some(Self::AppDetached {
+            }),
+            OP_APP_DETACHED => Ok(Self::AppDetached {
                 app_id: buf.get_u32_le(),
                 reason: buf.get_u8(),
-            })),
+            }),
             OP_LOAD_BITMAP => {
                 if payload_len < 8 {
                     return Err(ProtocolError::PayloadLengthMismatch);
@@ -597,14 +599,14 @@ impl ControlMessage {
                 if byte_len != payload_len - 8 {
                     return Err(ProtocolError::PayloadLengthMismatch);
                 }
-                Ok(Some(Self::LoadBitmap {
+                Ok(Self::LoadBitmap {
                     bitmap_id,
                     bytes: buf.copy_to_bytes(byte_len).to_vec(),
-                }))
+                })
             }
-            OP_LIST_MONITOR_TYPES => Ok(Some(Self::ListMonitorTypes {
+            OP_LIST_MONITOR_TYPES => Ok(Self::ListMonitorTypes {
                 request_id: buf.get_u32_le(),
-            })),
+            }),
             OP_MONITOR_TYPES => {
                 if payload_len < 8 {
                     return Err(ProtocolError::PayloadLengthMismatch);
@@ -633,12 +635,12 @@ impl ControlMessage {
                         flags: buf.get_u32_le(),
                     });
                 }
-                Ok(Some(Self::MonitorTypes {
+                Ok(Self::MonitorTypes {
                     request_id,
                     entries,
-                }))
+                })
             }
-            OP_START_MONITOR => Ok(Some(Self::StartMonitor {
+            OP_START_MONITOR => Ok(Self::StartMonitor {
                 request_id: buf.get_u32_le(),
                 kind: MonitorKind::from_wire(buf.get_u8())?,
                 count: buf.get_u32_le(),
@@ -649,7 +651,7 @@ impl ControlMessage {
                 y: buf.get_i32_le(),
                 w: buf.get_u32_le(),
                 h: buf.get_u32_le(),
-            })),
+            }),
             OP_START_MONITOR_RESULT => {
                 if payload_len < 9 {
                     return Err(ProtocolError::PayloadLengthMismatch);
@@ -664,41 +666,24 @@ impl ControlMessage {
                 for _ in 0..count {
                     monitor_ids.push(buf.get_u32_le());
                 }
-                Ok(Some(Self::StartMonitorResult {
+                Ok(Self::StartMonitorResult {
                     request_id,
                     status,
                     monitor_ids,
-                }))
+                })
             }
-            OP_STOP_MONITOR => Ok(Some(Self::StopMonitor {
+            OP_STOP_MONITOR => Ok(Self::StopMonitor {
                 request_id: buf.get_u32_le(),
                 monitor_id: buf.get_u32_le(),
-            })),
-            OP_STOP_MONITOR_RESULT => Ok(Some(Self::StopMonitorResult {
+            }),
+            OP_STOP_MONITOR_RESULT => Ok(Self::StopMonitorResult {
                 request_id: buf.get_u32_le(),
                 status: MonitorRequestStatus::from_wire(buf.get_u8())?,
-            })),
-            OP_REGISTER_MONITOR_V2 => Ok(Some(Self::RegisterMonitorV2 {
-                pid: buf.get_u32_le(),
-                kind: MonitorKind::from_wire(buf.get_u8())?,
-                owner_app_id: buf.get_u32_le(),
-                request_id: buf.get_u32_le(),
-                target_canvas_id: buf.get_u32_le(),
-                mode: DesktopWindowMode::from_wire(buf.get_u8())?,
-                flags: buf.get_u32_le(),
-                manual_lifecycle: buf.get_u8() != 0,
-            })),
-            OP_CLOSE_MONITOR => Ok(Some(Self::CloseMonitor {
+            }),
+            OP_CLOSE_MONITOR => Ok(Self::CloseMonitor {
                 monitor_id: buf.get_u32_le(),
-            })),
-            _ => {
-                buf.advance(payload_len);
-                eprintln!(
-                    "[protocol] unknown opcode {:#06x} — skipping {} payload bytes",
-                    opcode, payload_len
-                );
-                Ok(None)
-            }
+            }),
+            _ => Err(ProtocolError::UnknownOpcode(opcode)),
         }
     }
 }
@@ -718,7 +703,16 @@ mod tests {
     fn known_payload_samples() -> Vec<(u16, Vec<u8>)> {
         let samples = [
             ControlMessage::RegisterApp { pid: 1 },
-            ControlMessage::RegisterMonitor { pid: 2 },
+            ControlMessage::RegisterMonitor {
+                pid: 2,
+                kind: MonitorKind::DesktopWindow,
+                owner_app_id: 3,
+                request_id: 4,
+                target_canvas_id: 5,
+                mode: DesktopWindowMode::Borderless,
+                flags: DESKTOP_WINDOW_FLAG_CLICK_THROUGH,
+                manual_lifecycle: false,
+            },
             ControlMessage::CreateCanvas {
                 logical_w: 800,
                 logical_h: 600,
@@ -775,16 +769,6 @@ mod tests {
                 request_id: 16,
                 status: MonitorRequestStatus::NotCoreManaged,
             },
-            ControlMessage::RegisterMonitorV2 {
-                pid: 17,
-                kind: MonitorKind::GameBar,
-                owner_app_id: 0,
-                request_id: 0,
-                target_canvas_id: 0,
-                mode: DesktopWindowMode::Bordered,
-                flags: 0,
-                manual_lifecycle: true,
-            },
             ControlMessage::CloseMonitor { monitor_id: 18 },
         ];
 
@@ -803,9 +787,7 @@ mod tests {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf);
         let header = MessageHeader::decode(&mut buf).unwrap();
-        let decoded = ControlMessage::decode(header.opcode, header.payload_len, &mut buf)
-            .unwrap()
-            .unwrap();
+        let decoded = ControlMessage::decode(header.opcode, header.payload_len, &mut buf).unwrap();
         assert_eq!(decoded, msg);
         assert!(buf.is_empty());
     }
@@ -814,9 +796,8 @@ mod tests {
     fn known_opcodes_decode_with_exact_payload_lengths() {
         for (opcode, payload) in known_payload_samples() {
             let mut buf = BytesMut::from(&payload[..]);
-            let decoded = ControlMessage::decode(opcode, payload.len() as u32, &mut buf)
+            ControlMessage::decode(opcode, payload.len() as u32, &mut buf)
                 .unwrap_or_else(|e| panic!("opcode {opcode:#06x} failed exact decode: {e}"));
-            assert!(decoded.is_some());
             assert!(buf.is_empty(), "opcode {opcode:#06x} left bytes behind");
         }
     }
@@ -879,12 +860,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_opcode_skips_full_advertised_payload() {
+    fn unknown_opcode_is_fatal() {
         let payload = [1, 2, 3, 4, 5];
         let mut buf = BytesMut::from(&payload[..]);
-        let decoded = ControlMessage::decode(0x9000, payload.len() as u32, &mut buf).unwrap();
-        assert!(decoded.is_none());
-        assert!(buf.is_empty());
+        let decoded = ControlMessage::decode(0x9000, payload.len() as u32, &mut buf);
+        assert!(matches!(decoded, Err(ProtocolError::UnknownOpcode(0x9000))));
     }
 
     #[test]

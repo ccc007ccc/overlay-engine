@@ -114,7 +114,7 @@ fn server_task_runtime_logs_use_app_monitor_terms() {
 
     for needle in [
         "Registered App with ID: {} (PID: {})",
-        "Registered Monitor with ID: {} (PID: {})",
+        "Registered {:?} Monitor with ID: {} (PID: {})",
         "CreateCanvas created ID {} for App {}",
         "CreateCanvas received but client is not a registered app",
         "AttachMonitor error: {}",

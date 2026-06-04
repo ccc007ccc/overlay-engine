@@ -1,17 +1,16 @@
 use bytes::BytesMut;
+use core_server::ipc::client::connect_to_core_or_start;
 use core_server::ipc::protocol::{
     ControlMessage, DesktopWindowMode, MessageHeader, MonitorKind, MonitorRequestStatus,
     MonitorTypeEntry, DESKTOP_WINDOW_FLAG_CLICK_THROUGH, HEADER_SIZE,
 };
+use core_server::server_task::PIPE_NAME;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::windows::named_pipe::ClientOptions;
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
-
-const PIPE_NAME: &str = r"\\.\pipe\overlay-core";
 
 const CMD_CLEAR: u16 = 0x0101;
 const CMD_FILL_RECT: u16 = 0x0102;
@@ -118,7 +117,7 @@ async fn send_control_message<W: AsyncWrite + Unpin>(
 
 async fn read_control_message<R: AsyncRead + Unpin>(
     reader: &mut R,
-) -> anyhow::Result<Option<ControlMessage>> {
+) -> anyhow::Result<ControlMessage> {
     let mut header_buf = [0u8; HEADER_SIZE];
     reader.read_exact(&mut header_buf).await?;
     let mut header_bytes = BytesMut::from(&header_buf[..]);
@@ -129,11 +128,7 @@ async fn read_control_message<R: AsyncRead + Unpin>(
         reader.read_exact(&mut payload_buf).await?;
     }
     let mut payload = BytesMut::from(&payload_buf[..]);
-    Ok(ControlMessage::decode(
-        header.opcode,
-        header.payload_len,
-        &mut payload,
-    )?)
+    ControlMessage::decode(header.opcode, header.payload_len, &mut payload).map_err(Into::into)
 }
 
 async fn wait_monitor_types<R: AsyncRead + Unpin>(
@@ -141,10 +136,10 @@ async fn wait_monitor_types<R: AsyncRead + Unpin>(
     request_id: u32,
 ) -> anyhow::Result<Vec<MonitorTypeEntry>> {
     loop {
-        if let Some(ControlMessage::MonitorTypes {
+        if let ControlMessage::MonitorTypes {
             request_id: id,
             entries,
-        }) = read_control_message(reader).await?
+        } = read_control_message(reader).await?
         {
             if id == request_id {
                 return Ok(entries);
@@ -158,11 +153,11 @@ async fn wait_start_monitor_result<R: AsyncRead + Unpin>(
     request_id: u32,
 ) -> anyhow::Result<(MonitorRequestStatus, Vec<u32>)> {
     loop {
-        if let Some(ControlMessage::StartMonitorResult {
+        if let ControlMessage::StartMonitorResult {
             request_id: id,
             status,
             monitor_ids,
-        }) = read_control_message(reader).await?
+        } = read_control_message(reader).await?
         {
             if id == request_id {
                 return Ok((status, monitor_ids));
@@ -702,18 +697,7 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("[demo-app] 连接 {}...", PIPE_NAME);
 
-    let mut client = loop {
-        match ClientOptions::new().open(PIPE_NAME) {
-            Ok(c) => break c,
-            Err(e)
-                if e.raw_os_error()
-                    == Some(windows::Win32::Foundation::ERROR_PIPE_BUSY.0 as i32) =>
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    };
+    let mut client = connect_to_core_or_start().await?;
     println!("[demo-app] 已连接");
 
     let mut buf = BytesMut::new();

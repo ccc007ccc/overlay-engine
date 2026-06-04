@@ -30,7 +30,10 @@ param(
     [string]$SignMode = 'Dev',
     [string]$PfxPath,
     [string]$PfxPassword,
-    [string]$TimestampUrl
+    [string]$TimestampUrl,
+
+    [switch]$ElevatedChild,
+    [switch]$TrustCertificateOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -114,6 +117,16 @@ function Ensure-DevCertificate {
         Export-Certificate -Cert $cert -FilePath $DevCerPath | Out-Null
         Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force
     }
+    elseif (-not (Test-Path $DevCerPath)) {
+        Write-Host "  exporting public dev cert from $DevPfxPath..." -ForegroundColor DarkGray
+        $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($DevPfxPath, $DevPfxPassword)
+        try {
+            [System.IO.File]::WriteAllBytes($DevCerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+        }
+        finally {
+            $cert.Dispose()
+        }
+    }
     return @{ Pfx = $DevPfxPath; Password = $DevPfxPassword; Cer = $DevCerPath }
 }
 
@@ -127,21 +140,58 @@ function Trust-DevCertificate {
 
     Import-Module PKI -ErrorAction Stop
     $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($CertificatePath)
-    $existing = @(Get-ChildItem -Path 'Cert:\LocalMachine\TrustedPeople' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Thumbprint -eq $cert.Thumbprint })
+    try {
+        $existing = @(Get-ChildItem -Path 'Cert:\LocalMachine\TrustedPeople' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Thumbprint -eq $cert.Thumbprint })
 
-    if ($existing.Count -eq 0) {
-        if (-not (Test-IsAdmin)) {
-            if ($RequireAdmin) { throw 'Admin rights are required to trust the OverlayWidget dev certificate.' }
-            Write-Host '  skipping cert import (Admin rights required). If app install fails, run this script as Admin once.' -ForegroundColor Yellow
-            return
+        if ($existing.Count -eq 0) {
+            if (-not (Test-IsAdmin)) {
+                if ($RequireAdmin) { throw 'Admin rights are required to trust the OverlayWidget dev certificate.' }
+                Write-Host '  skipping cert import (Admin rights required). If app install fails, run this script as Admin once.' -ForegroundColor Yellow
+                return
+            }
+            Import-Certificate -FilePath $CertificatePath -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+            Write-Host "  ok: imported (thumbprint=$($cert.Thumbprint))" -ForegroundColor Green
         }
-        Import-Certificate -FilePath $CertificatePath -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
-        Write-Host '  ok: imported' -ForegroundColor Green
+        else {
+            Write-Host "  ok: already trusted (thumbprint=$($existing[0].Thumbprint))" -ForegroundColor Green
+        }
     }
-    else {
-        Write-Host "  ok: already trusted (thumbprint=$($existing[0].Thumbprint))" -ForegroundColor Green
+    finally {
+        $cert.Dispose()
     }
+}
+
+function Quote-PowerShellArgument([string]$Value) {
+    if ($null -eq $Value) { return "''" }
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function Invoke-SelfElevatedCertificateTrust([string]$CertificatePath) {
+    if ($ElevatedChild) { throw 'Elevated certificate trust child is still not running as Admin.' }
+    if (-not (Test-Path $CertificatePath)) { throw "Dev certificate not found: $CertificatePath" }
+    if (-not $PSCommandPath) { throw 'Unable to locate current script path for elevation.' }
+
+    $scriptPath = [System.IO.Path]::GetFullPath($PSCommandPath)
+    $certPath = [System.IO.Path]::GetFullPath($CertificatePath)
+    $childCommand = "& $(Quote-PowerShellArgument $scriptPath) -TrustCertificateOnly -DevCertPath $(Quote-PowerShellArgument $certPath) -ElevatedChild"
+    $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($childCommand))
+    $childArgs = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-EncodedCommand', $encodedCommand
+    ) -join ' '
+
+    Write-Host '  admin approval required to trust the dev certificate.' -ForegroundColor Yellow
+    try {
+        $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
+    }
+    catch {
+        throw "Admin approval is required to trust the OverlayWidget dev certificate. UAC was cancelled or failed: $($_.Exception.Message)"
+    }
+
+    if ($null -eq $process.ExitCode) { throw 'Elevated certificate trust finished without an exit code.' }
+    if ($process.ExitCode -ne 0) { throw "Elevated certificate trust failed: exit $($process.ExitCode)" }
 }
 
 function Invoke-BuildMsix {
@@ -255,10 +305,21 @@ function Invoke-InstallMsix([string]$Path, [string]$DepsDir) {
     }
 }
 
+if ($TrustCertificateOnly) {
+    if (-not $DevCertPath) { throw '-DevCertPath is required with -TrustCertificateOnly.' }
+    Write-Host 'OverlayWidget Dev Certificate Trust' -ForegroundColor White
+    Trust-DevCertificate -CertificatePath $DevCertPath -RequireAdmin
+    return
+}
+
 if ($InstallOnly) {
     if (-not $MsixPath) { throw '-MsixPath is required with -InstallOnly.' }
+    if (-not (Test-Path $MsixPath)) { throw "MSIX not found: $MsixPath" }
+    $MsixPath = [System.IO.Path]::GetFullPath($MsixPath)
     if (-not $DependencyDir) { $DependencyDir = Join-Path (Split-Path -Parent $MsixPath) "Dependencies\$Platform" }
+    if ($DependencyDir -and (Test-Path $DependencyDir)) { $DependencyDir = [System.IO.Path]::GetFullPath($DependencyDir) }
     if ($TrustDevCertificate -and -not $DevCertPath) { $DevCertPath = Join-Path (Split-Path -Parent $MsixPath) 'OverlayWidget_Dev.cer' }
+    if ($TrustDevCertificate) { $DevCertPath = [System.IO.Path]::GetFullPath($DevCertPath) }
 
     $totalSteps = if ($TrustDevCertificate) { 2 } else { 1 }
     $step = 0
@@ -267,7 +328,12 @@ if ($InstallOnly) {
     if ($TrustDevCertificate) {
         $step++
         Write-Step $step $totalSteps 'trust certificate'
-        Trust-DevCertificate -CertificatePath $DevCertPath -RequireAdmin
+        if (Test-IsAdmin) {
+            Trust-DevCertificate -CertificatePath $DevCertPath -RequireAdmin
+        }
+        else {
+            Invoke-SelfElevatedCertificateTrust -CertificatePath $DevCertPath
+        }
     }
 
     $step++

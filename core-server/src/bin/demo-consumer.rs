@@ -1,5 +1,7 @@
 use bytes::BytesMut;
-use core_server::ipc::protocol::{ControlMessage, MessageHeader, HEADER_SIZE};
+use core_server::ipc::protocol::{
+    ControlMessage, DesktopWindowMode, MessageHeader, MonitorKind, HEADER_SIZE,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::ClientOptions;
 
@@ -29,6 +31,13 @@ async fn main() -> anyhow::Result<()> {
     // Send RegisterMonitor message
     let msg = ControlMessage::RegisterMonitor {
         pid: std::process::id(),
+        kind: MonitorKind::DesktopWindow,
+        owner_app_id: 0,
+        request_id: 0,
+        target_canvas_id: 0,
+        mode: DesktopWindowMode::Bordered,
+        flags: 0,
+        manual_lifecycle: true,
     };
     let mut buf = BytesMut::new();
     msg.encode(&mut buf);
@@ -62,16 +71,7 @@ async fn main() -> anyhow::Result<()> {
             buf.extend_from_slice(&payload_buf);
         }
 
-        let msg = match ControlMessage::decode(header.opcode, header.payload_len, &mut buf)? {
-            Some(m) => m,
-            None => {
-                // Unknown opcode (e.g. `OP_MONITOR_LOCAL_SURFACE_ATTACHED`
-                // sent by a newer Core). decode() already skipped the
-                // payload bytes and logged the warning. Keep the loop
-                // going so we continue to receive CanvasAttached.
-                continue;
-            }
-        };
+        let msg = ControlMessage::decode(header.opcode, header.payload_len, &mut buf)?;
         if let ControlMessage::CanvasAttached {
             canvas_id,
             surface_handle,

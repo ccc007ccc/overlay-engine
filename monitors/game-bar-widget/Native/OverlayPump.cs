@@ -27,7 +27,6 @@ namespace OverlayWidget.Native
         {
             // Must match core-server/src/ipc/protocol.rs.
             RegisterMonitor = 0x0002,
-            RegisterMonitorV2 = 0x0010,
             CanvasAttached = 0x0005,
             MonitorLocalAttached = 0x0007,
             AppDetached = 0x0008
@@ -114,8 +113,8 @@ namespace OverlayWidget.Native
                     await _pipeStream.ConnectAsync(500, token);
                     OnStatusChanged?.Invoke("Connected. Registering...");
 
-                    byte[] registerPayload = BuildRegisterMonitorV2Payload();
-                    await WriteIpcMessageAsync(_pipeStream, IpcOpcode.RegisterMonitorV2, registerPayload, token);
+                    byte[] registerPayload = BuildRegisterMonitorPayload();
+                    await WriteIpcMessageAsync(_pipeStream, IpcOpcode.RegisterMonitor, registerPayload, token);
 
                     OnStatusChanged?.Invoke("Registered with Core Server. Waiting for Canvas...");
 
@@ -406,7 +405,7 @@ namespace OverlayWidget.Native
             buffer[offset + 3] = (byte)(value >> 24);
         }
 
-        private static byte[] BuildRegisterMonitorV2Payload()
+        private static byte[] BuildRegisterMonitorPayload()
         {
             byte[] payload = new byte[23];
             WriteUInt32LittleEndian(payload, 0, (uint)Process.GetCurrentProcess().Id);

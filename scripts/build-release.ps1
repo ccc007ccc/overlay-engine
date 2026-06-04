@@ -11,7 +11,7 @@ param(
     [ValidateSet('x64')]
     [string]$Platform = 'x64',
 
-    [string]$Version = '0.1.2',
+    [string]$Version = '0.1.3',
 
     [ValidateSet('Dev', 'Pfx', 'None')]
     [string]$SignMode = 'Dev',
@@ -49,7 +49,17 @@ Write-Host "  Version       : $Version" -ForegroundColor DarkGray
 Write-Host "  Platform      : $Platform" -ForegroundColor DarkGray
 Write-Host "  StageDir      : $StageDir" -ForegroundColor DarkGray
 
-Write-Step '[1/5] cargo build allowlist'
+Write-Step '[1/6] generate icons'
+Push-Location $ProjectRoot
+try {
+    python scripts/generate-icons.py
+    if ($LASTEXITCODE -ne 0) { throw "icon generation failed: exit $LASTEXITCODE" }
+}
+finally {
+    Pop-Location
+}
+
+Write-Step '[2/6] cargo build allowlist'
 Push-Location $ProjectRoot
 try {
     if ($Clean) { cargo clean }
@@ -64,18 +74,18 @@ finally {
     Pop-Location
 }
 
-Write-Step '[2/5] prepare staging directories'
+Write-Step '[3/6] prepare staging directories'
 if (Test-Path $StageDir) { Remove-Item -Path $StageDir -Recurse -Force }
 New-Item -ItemType Directory -Path $AppDir, $WidgetDir, $ScriptsDir -Force | Out-Null
 
-Write-Step '[3/5] copy allowlisted app artifacts'
+Write-Step '[4/6] copy allowlisted app artifacts'
 $ReleaseDir = Join-Path $ProjectRoot 'target\release'
 Copy-Required -Source (Join-Path $ReleaseDir 'core-server.exe') -Destination (Join-Path $AppDir 'core-server.exe')
 Copy-Required -Source (Join-Path $ReleaseDir 'desktop-window-monitor.exe') -Destination (Join-Path $AppDir 'desktop-window-monitor.exe')
 $renderer = Join-Path $ReleaseDir 'renderer.dll'
 if (Test-Path $renderer) { Copy-Required -Source $renderer -Destination (Join-Path $AppDir 'renderer.dll') }
 
-Write-Step '[4/5] build/package Game Bar widget'
+Write-Step '[5/6] build/package Game Bar widget'
 $widgetInstall = Join-Path $ProjectRoot 'monitors\game-bar-widget\install.ps1'
 if (-not $SkipWidget) {
     $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $widgetInstall, '-PackageOnly', '-Configuration', $Configuration, '-Platform', $Platform, '-SignMode', $SignMode)
@@ -103,7 +113,7 @@ if (-not $SkipWidget) {
     }
 }
 
-Write-Step '[5/5] copy scripts and write manifest'
+Write-Step '[6/6] copy scripts and write manifest'
 Copy-Required -Source (Join-Path $ProjectRoot 'install.ps1') -Destination (Join-Path $ScriptsDir 'install.ps1')
 Copy-Required -Source (Join-Path $ProjectRoot 'uninstall.ps1') -Destination (Join-Path $ScriptsDir 'uninstall.ps1')
 Copy-Required -Source $widgetInstall -Destination (Join-Path $ScriptsDir 'game-bar-widget-install.ps1')

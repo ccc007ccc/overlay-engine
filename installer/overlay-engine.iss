@@ -1,8 +1,14 @@
 #define AppName "overlay-engine"
-#define AppVersion "0.1.2"
+#ifndef AppVersion
+#define AppVersion "0.1.3"
+#endif
 #define AppPublisher "overlay-engine"
+#ifndef Platform
 #define Platform "x64"
-#define StageDir "..\dist\overlay-engine-0.1.2-x64"
+#endif
+#ifndef StageDir
+#define StageDir "..\dist\overlay-engine-" + AppVersion + "-" + Platform
+#endif
 
 [Setup]
 AppId={{9F2A7D2E-1C2B-4BB4-9A9F-0B5F1D8C2E20}
@@ -18,8 +24,9 @@ Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\core-server.exe
+SetupIconFile=..\core-server\resources\overlay-core.ico
 WizardStyle=modern
 
 [Languages]
@@ -48,18 +55,25 @@ Source: "{#StageDir}\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion 
 Source: "{#StageDir}\manifest.json"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{autodesktop}\overlay-engine"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Start-overlay-engine.ps1"""; WorkingDir: "{app}"; Comment: "Start overlay-engine"; Tasks: desktopicon
-Name: "{group}\Start overlay-engine"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Start-overlay-engine.ps1"""; WorkingDir: "{app}"; Comment: "Start overlay-engine"; Tasks: startmenu
-Name: "{group}\Stop overlay-engine"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Stop-overlay-engine.ps1"""; WorkingDir: "{app}"; Comment: "Stop overlay-engine"; Tasks: startmenu
-Name: "{group}\Uninstall overlay-engine"; Filename: "{uninstallexe}"; Comment: "Uninstall overlay-engine"; Tasks: startmenu
-
-[Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\install.ps1"" -Release -SourceDir ""{app}"" -InstallDir ""{app}"" {code:GetInstallBackendArgs} -SkipUninstallRegistry -Quiet"; Flags: runhidden waituntilterminated
+Name: "{autodesktop}\overlay-engine"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Start-overlay-engine.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\core-server.exe"; Comment: "Start overlay-engine"; Tasks: desktopicon
+Name: "{group}\Start overlay-engine"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Start-overlay-engine.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\core-server.exe"; Comment: "Start overlay-engine"; Tasks: startmenu
+Name: "{group}\Stop overlay-engine"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Stop-overlay-engine.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\core-server.exe"; Comment: "Stop overlay-engine"; Tasks: startmenu
+Name: "{group}\Uninstall overlay-engine"; Filename: "{uninstallexe}"; IconFilename: "{app}\core-server.exe"; Comment: "Uninstall overlay-engine"; Tasks: startmenu
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\uninstall.ps1"" -Release -InstallDir ""{app}"" -RemoveWidget -Quiet"; Flags: runhidden waituntilterminated; RunOnceId: "overlay-engine-release-uninstall"
 
 [Code]
+procedure RemoveLegacyMachineUninstallEntry();
+var
+  MachineUninstallKey: String;
+begin
+  MachineUninstallKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{9F2A7D2E-1C2B-4BB4-9A9F-0B5F1D8C2E20}_is1';
+  if IsAdmin then begin
+    RegDeleteKeyIncludingSubkeys(HKLM, MachineUninstallKey);
+  end;
+end;
+
 function StopExistingOverlayEngine(): Boolean;
 var
   ScriptPath: String;
@@ -120,11 +134,37 @@ begin
   if WizardIsComponentSelected('gamebar') then
     Components := Components + ',GameBarWidget';
 
-  Result := '-Components ' + Components;
+  Result := '-Components ' + Components + ' -InstallHost Inno';
   if WizardIsTaskSelected('autostart') then
     Result := Result + ' -AutoStart';
   if WizardIsTaskSelected('desktopicon') then
     Result := Result + ' -CreateDesktopShortcut';
   if WizardIsTaskSelected('startmenu') then
     Result := Result + ' -CreateStartMenu';
+end;
+
+procedure RunInstallBackend();
+var
+  Params: String;
+  LogPath: String;
+  ResultCode: Integer;
+begin
+  LogPath := ExpandConstant('{localappdata}\overlay-engine-install-backend.log');
+  Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\scripts\install.ps1') +
+    '" -Release -SourceDir "' + ExpandConstant('{app}') + '" -InstallDir "' + ExpandConstant('{app}') +
+    '" ' + GetInstallBackendArgs('') + ' -SkipUninstallRegistry -Quiet -LogPath "' + LogPath + '"';
+
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    RaiseException('Unable to start overlay-engine install backend: ' + SysErrorMessage(ResultCode));
+
+  if ResultCode <> 0 then
+    RaiseException('overlay-engine install backend failed with exit code ' + IntToStr(ResultCode) + '. Log: ' + LogPath + '.');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then begin
+    RunInstallBackend();
+    RemoveLegacyMachineUninstallEntry();
+  end;
 end;

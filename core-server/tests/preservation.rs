@@ -54,7 +54,8 @@
 
 use core_server::ipc::cmd_decoder::{decode_commands, RenderCommand};
 use core_server::ipc::protocol::{
-    ControlMessage, MessageHeader, ProtocolError, HEADER_SIZE, MAGIC, VERSION,
+    ControlMessage, DesktopWindowMode, MessageHeader, MonitorKind, ProtocolError, HEADER_SIZE,
+    MAGIC, VERSION,
 };
 use core_server::renderer::painter::DrawCmd;
 
@@ -156,6 +157,28 @@ fn capture_or_verify_bytes(path: &Path, content: &[u8]) {
 // space for the round-trip equality property.
 // ---------------------------------------------------------------------------
 
+fn register_monitor_sample(
+    pid: u32,
+    kind: MonitorKind,
+    owner_app_id: u32,
+    request_id: u32,
+    target_canvas_id: u32,
+    mode: DesktopWindowMode,
+    flags: u32,
+    manual_lifecycle: bool,
+) -> ControlMessage {
+    ControlMessage::RegisterMonitor {
+        pid,
+        kind,
+        owner_app_id,
+        request_id,
+        target_canvas_id,
+        mode,
+        flags,
+        manual_lifecycle,
+    }
+}
+
 fn canonical_control_samples() -> Vec<ControlMessage> {
     // Deterministic, small, exhaustive-flavored set. Order matters: it is the
     // on-disk layout of the oracle.
@@ -163,9 +186,36 @@ fn canonical_control_samples() -> Vec<ControlMessage> {
         ControlMessage::RegisterApp { pid: 0 },
         ControlMessage::RegisterApp { pid: 42 },
         ControlMessage::RegisterApp { pid: u32::MAX },
-        ControlMessage::RegisterMonitor { pid: 0 },
-        ControlMessage::RegisterMonitor { pid: 7 },
-        ControlMessage::RegisterMonitor { pid: u32::MAX },
+        register_monitor_sample(
+            0,
+            MonitorKind::DesktopWindow,
+            0,
+            0,
+            0,
+            DesktopWindowMode::Bordered,
+            0,
+            true,
+        ),
+        register_monitor_sample(
+            7,
+            MonitorKind::DesktopWindow,
+            1,
+            2,
+            3,
+            DesktopWindowMode::Borderless,
+            1,
+            false,
+        ),
+        register_monitor_sample(
+            u32::MAX,
+            MonitorKind::GameBar,
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+            DesktopWindowMode::BorderlessFullscreen,
+            u32::MAX,
+            true,
+        ),
         ControlMessage::CreateCanvas {
             logical_w: 0,
             logical_h: 0,
@@ -250,11 +300,7 @@ fn encode_one(msg: &ControlMessage) -> Vec<u8> {
 fn decode_one(bytes: &[u8]) -> Result<ControlMessage, ProtocolError> {
     let mut buf = BytesMut::from(bytes);
     let header = MessageHeader::decode(&mut buf)?;
-    // Task 3.3 introduced unknown-opcode downgrade; `decode` now returns
-    // `Result<Option<Self>, _>`. For preservation we always encode known
-    // opcodes, so `None` here is itself a round-trip failure.
-    ControlMessage::decode(header.opcode, header.payload_len, &mut buf)?
-        .ok_or(ProtocolError::UnknownOpcode(header.opcode))
+    ControlMessage::decode(header.opcode, header.payload_len, &mut buf)
 }
 
 fn build_control_plane_oracle() -> Vec<u8> {
@@ -315,8 +361,52 @@ fn assert_standard_header(msg: &ControlMessage) {
 fn any_register_producer() -> impl Strategy<Value = ControlMessage> {
     any::<u32>().prop_map(|pid| ControlMessage::RegisterApp { pid })
 }
+fn any_monitor_kind() -> impl Strategy<Value = MonitorKind> {
+    prop_oneof![Just(MonitorKind::DesktopWindow), Just(MonitorKind::GameBar),]
+}
+
+fn any_desktop_window_mode() -> impl Strategy<Value = DesktopWindowMode> {
+    prop_oneof![
+        Just(DesktopWindowMode::Bordered),
+        Just(DesktopWindowMode::Borderless),
+        Just(DesktopWindowMode::BorderlessFullscreen),
+    ]
+}
+
 fn any_register_monitor() -> impl Strategy<Value = ControlMessage> {
-    any::<u32>().prop_map(|pid| ControlMessage::RegisterMonitor { pid })
+    (
+        any::<u32>(),
+        any_monitor_kind(),
+        any::<u32>(),
+        any::<u32>(),
+        any::<u32>(),
+        any_desktop_window_mode(),
+        any::<u32>(),
+        any::<bool>(),
+    )
+        .prop_map(
+            |(
+                pid,
+                kind,
+                owner_app_id,
+                request_id,
+                target_canvas_id,
+                mode,
+                flags,
+                manual_lifecycle,
+            )| {
+                register_monitor_sample(
+                    pid,
+                    kind,
+                    owner_app_id,
+                    request_id,
+                    target_canvas_id,
+                    mode,
+                    flags,
+                    manual_lifecycle,
+                )
+            },
+        )
 }
 fn any_create_canvas() -> impl Strategy<Value = ControlMessage> {
     (any::<u32>(), any::<u32>(), any::<u32>(), any::<u32>()).prop_map(
@@ -443,13 +533,11 @@ proptest! {
 
 // ---------------------------------------------------------------------------
 // PBT A' — New `MonitorLocalSurfaceAttached` opcode round-trip, and
-// unknown-opcode downgrade (task 3.3 of the `animation-and-viewport-fix`
-// spec).
+// unknown-opcode fatal reject for the current no-legacy protocol.
 //
-// The existing `control_plane_bytes.bin` oracle is deliberately NOT touched
-// here — Preservation 3.1 requires the pre-existing 6-variant byte layouts
-// to be bit-identical across the fix. The new variant gets its own oracle
-// file so the old oracle stays pinned.
+// The main `control_plane_bytes.bin` oracle tracks the current no-legacy
+// control-plane contract. MonitorLocal keeps a separate oracle because it is a
+// distinct handoff message with its own payload shape.
 // ---------------------------------------------------------------------------
 
 use core_server::ipc::protocol::OP_MONITOR_LOCAL_SURFACE_ATTACHED;
@@ -557,18 +645,13 @@ proptest! {
         assert_roundtrip_bit_identical(&msg);
     }
 
-    /// **Unknown-opcode downgrade (task 3.3).**
+    /// **Unknown-opcode fatal reject.**
     ///
-    /// For any opcode NOT in `{0x0001..=0x0007}` with a random small
-    /// payload, `ControlMessage::decode` returns `Ok(None)` (warn + skip)
-    /// rather than `Err`. The advertised payload is consumed so subsequent
-    /// frames stay aligned.
-    ///
-    /// This property is what keeps older consumers — which don't know
-    /// about `OP_MONITOR_LOCAL_SURFACE_ATTACHED` — from tearing down their
-    /// IPC connection when Core sends that message (Preservation 3.2 / 3.3).
+    /// 开发早期不保留旧协议兼容：任何未定义 opcode 都必须立即返回
+    /// `ProtocolError::UnknownOpcode`，避免客户端和 Core 在协议漂移后继续
+    /// 以未知状态运行。
     #[test]
-    fn pbt_a_prime_unknown_opcode_is_skipped_not_fatal(
+    fn pbt_a_prime_unknown_opcode_is_fatal(
         opcode in 0x0100u16..=0xFFFFu16,
         payload in prop::collection::vec(any::<u8>(), 0..=32usize),
     ) {
@@ -585,24 +668,15 @@ proptest! {
         let decoded_hdr = MessageHeader::decode(&mut frame)
             .expect("synthetic header must decode");
 
-        // decode() must return Ok(None), NOT Err(ProtocolError::UnknownOpcode).
         let result = ControlMessage::decode(
             decoded_hdr.opcode,
             decoded_hdr.payload_len,
             &mut frame,
         );
         prop_assert!(
-            matches!(result, Ok(None)),
-            "unknown opcode {:#06x} must downgrade to Ok(None), got {:?}",
+            matches!(result, Err(ProtocolError::UnknownOpcode(code)) if code == opcode),
+            "unknown opcode {:#06x} must be fatal, got {:?}",
             opcode, result,
-        );
-
-        // And the payload bytes are fully consumed — the buffer must be
-        // empty or aligned on the next frame boundary.
-        prop_assert!(
-            frame.is_empty(),
-            "decode() must consume the advertised payload; {} bytes remain",
-            frame.len()
         );
     }
 }
@@ -1315,10 +1389,24 @@ fn exercise_consumer_sequence(steps: &[ConsumerStep]) -> Result<(), String> {
                     continue;
                 }
                 let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<ControlMessage>();
-                let monitor_id = state.register_monitor(*pid, windows_foundation_handle_null(), tx);
-                // attach_monitor is invoked by register_monitor auto-attach
-                // loop for every existing canvas — so our consumer should
-                // already be attached by the time we get here.
+                let monitor_pid = std::process::id();
+                let (monitor_id, should_close) = state.register_monitor(
+                    monitor_pid,
+                    windows_foundation_handle_null(),
+                    tx,
+                    MonitorKind::DesktopWindow,
+                    Some(producer_id),
+                    None,
+                    Some(canvas_id),
+                    DesktopWindowMode::Bordered,
+                    0,
+                    true,
+                );
+                if should_close {
+                    return Err(format!(
+                        "step {i}: monitor {monitor_id} was rejected for owned canvas {canvas_id}"
+                    ));
+                }
                 live.push((monitor_id, *pid));
             }
             ConsumerStep::Down(raw_idx) => {

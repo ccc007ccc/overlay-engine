@@ -596,17 +596,7 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                 buf.extend_from_slice(&payload_buf);
             }
 
-            let msg = match ControlMessage::decode(header.opcode, header.payload_len, &mut buf)? {
-                Some(m) => m,
-                None => {
-                    // Unknown opcode (task 3.3 backward-compat downgrade): the
-                    // decoder skipped the advertised payload and logged a warn.
-                    // We continue the IPC read loop rather than tearing down the
-                    // client, preserving forward compatibility with future Core
-                    // opcodes.
-                    continue;
-                }
-            };
+            let msg = ControlMessage::decode(header.opcode, header.payload_len, &mut buf)?;
             // Process message
             match msg {
                 ControlMessage::RegisterApp { pid } => {
@@ -617,19 +607,7 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                     client_id = Some((id, true));
                     println!("Registered App with ID: {} (PID: {})", id, pid);
                 }
-                ControlMessage::RegisterMonitor { pid } => {
-                    let id = {
-                        let mut state = crate::ipc::server::SERVER_STATE.write();
-                        state.register_monitor(
-                            pid,
-                            windows::Win32::Foundation::HANDLE::default(),
-                            tx.clone(),
-                        )
-                    };
-                    client_id = Some((id, false));
-                    println!("Registered Monitor with ID: {} (PID: {})", id, pid);
-                }
-                ControlMessage::RegisterMonitorV2 {
+                ControlMessage::RegisterMonitor {
                     pid,
                     kind,
                     owner_app_id,
@@ -644,7 +622,7 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                     let target_canvas_id_opt = (target_canvas_id != 0).then_some(target_canvas_id);
                     let (id, should_close) = {
                         let mut state = crate::ipc::server::SERVER_STATE.write();
-                        state.register_monitor_v2(
+                        state.register_monitor(
                             pid,
                             windows::Win32::Foundation::HANDLE::default(),
                             tx.clone(),
@@ -694,9 +672,9 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                     canvas_id,
                     monitor_id,
                 } => {
-                    if let Some((_id, true)) = client_id {
+                    if let Some((id, true)) = client_id {
                         let mut state = crate::ipc::server::SERVER_STATE.write();
-                        if let Err(e) = state.attach_monitor(canvas_id, monitor_id) {
+                        if let Err(e) = state.attach_monitor_for_app(id, canvas_id, monitor_id) {
                             eprintln!("AttachMonitor error: {}", e);
                         } else {
                             println!("Attached Canvas {} to Monitor {}", canvas_id, monitor_id);
@@ -739,12 +717,40 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
 
                     match kind {
                         MonitorKind::GameBar => {
-                            send_start_monitor_result(
-                                &tx,
-                                request_id,
-                                MonitorRequestStatus::ManualOpenRequired,
-                                Vec::new(),
-                            );
+                            let catalog = crate::process_manager::get_monitor_catalog();
+                            let Some(game_bar) = catalog.game_bar else {
+                                send_start_monitor_result(
+                                    &tx,
+                                    request_id,
+                                    MonitorRequestStatus::Unavailable,
+                                    Vec::new(),
+                                );
+                                continue;
+                            };
+                            if !game_bar.available {
+                                send_start_monitor_result(
+                                    &tx,
+                                    request_id,
+                                    MonitorRequestStatus::Unavailable,
+                                    Vec::new(),
+                                );
+                                continue;
+                            }
+                            if count > game_bar.max_instances {
+                                send_start_monitor_result(
+                                    &tx,
+                                    request_id,
+                                    MonitorRequestStatus::LimitExceeded,
+                                    Vec::new(),
+                                );
+                                continue;
+                            }
+
+                            let (status, monitor_ids) = {
+                                let mut state = crate::ipc::server::SERVER_STATE.write();
+                                state.attach_game_bar_monitor_for_app(app_id, target_canvas_id, count)
+                            };
+                            send_start_monitor_result(&tx, request_id, status, monitor_ids);
                         }
                         MonitorKind::DesktopWindow => {
                             let catalog = crate::process_manager::get_monitor_catalog();

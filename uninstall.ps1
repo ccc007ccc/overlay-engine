@@ -18,6 +18,7 @@ $ErrorActionPreference = 'Stop'
 $ScheduledTaskName = 'overlay-engine Core'
 $AppName = 'overlay-engine'
 $StartupShortcutName = 'overlay-engine.lnk'
+$CoreRegistryKey = 'HKCU:\Software\overlay-engine\Core'
 
 function Write-UninstallHost([string]$Message, [ConsoleColor]$Color = [ConsoleColor]::Gray) {
     if (-not $Quiet) { Write-Host $Message -ForegroundColor $Color }
@@ -29,16 +30,22 @@ function Test-IsAdmin {
     return $p.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-PathInsideRoot([string]$Path, [string]$RootDir) {
+    if (-not $Path -or -not $RootDir) { return $false }
+    $rootFull = [System.IO.Path]::GetFullPath($RootDir).TrimEnd('\')
+    $full = [System.IO.Path]::GetFullPath($Path)
+    return $full.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $full.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Stop-InstalledProcess([string]$Name, [string]$RootDir) {
     if (-not $RootDir) { return }
-    $rootFull = [System.IO.Path]::GetFullPath($RootDir).TrimEnd('\')
     $targets = New-Object 'System.Collections.Generic.List[int]'
     $filter = "Name = '$Name.exe'"
 
     foreach ($p in @(Get-CimInstance Win32_Process -Filter $filter -ErrorAction SilentlyContinue)) {
         if (-not $p.ExecutablePath) { continue }
-        $full = [System.IO.Path]::GetFullPath($p.ExecutablePath)
-        if ($full.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -and -not $targets.Contains([int]$p.ProcessId)) {
+        if ((Test-PathInsideRoot -Path $p.ExecutablePath -RootDir $RootDir) -and -not $targets.Contains([int]$p.ProcessId)) {
             $targets.Add([int]$p.ProcessId)
         }
     }
@@ -47,8 +54,7 @@ function Stop-InstalledProcess([string]$Name, [string]$RootDir) {
         $path = $null
         try { $path = $p.MainModule.FileName } catch { }
         if (-not $path) { continue }
-        $full = [System.IO.Path]::GetFullPath($path)
-        if ($full.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -and -not $targets.Contains([int]$p.Id)) {
+        if ((Test-PathInsideRoot -Path $path -RootDir $RootDir) -and -not $targets.Contains([int]$p.Id)) {
             $targets.Add([int]$p.Id)
         }
     }
@@ -68,14 +74,23 @@ function Stop-InstalledProcess([string]$Name, [string]$RootDir) {
     throw "Unable to stop installed $Name process(es): $($alive -join ', ')"
 }
 
-function Remove-OverlayWidgetMsix([bool]$All) {
-    $getParams = @{ Name = '*OverlayWidget*'; ErrorAction = 'SilentlyContinue' }
-    if ($All) {
-        if (-not (Test-IsAdmin)) { throw '-AllUsers requires Admin. Re-run from an elevated PowerShell.' }
-        $getParams.AllUsers = $true
+function Remove-OverlayWidgetMsix([bool]$All, $State) {
+    if ($All -and -not (Test-IsAdmin)) { throw '-AllUsers requires Admin. Re-run from an elevated PowerShell.' }
+
+    $pkgs = @()
+    if ($State -and $State.msixPackageFullName) {
+        $fullName = [string]$State.msixPackageFullName
+        $getParams = @{ ErrorAction = 'SilentlyContinue' }
+        if ($All) { $getParams.AllUsers = $true }
+        $pkgs = @(Get-AppxPackage @getParams | Where-Object { $_.PackageFullName -eq $fullName })
     }
 
-    $pkgs = @(Get-AppxPackage @getParams)
+    if ($pkgs.Count -eq 0) {
+        $getParams = @{ Name = 'OverlayWidget'; ErrorAction = 'SilentlyContinue' }
+        if ($All) { $getParams.AllUsers = $true }
+        $pkgs = @(Get-AppxPackage @getParams)
+    }
+
     if ($pkgs.Count -eq 0) {
         Write-UninstallHost '  no OverlayWidget packages installed.' DarkGray
         return
@@ -106,6 +121,10 @@ function Remove-OverlayShortcuts([string]$RootDir) {
 function Remove-UninstallRegistry {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\overlay-engine'
     if (Test-Path $key) { Remove-Item $key -Recurse -Force }
+}
+
+function Remove-CoreLocationRegistry {
+    if (Test-Path $CoreRegistryKey) { Remove-Item $CoreRegistryKey -Recurse -Force }
 }
 
 function Remove-RegistryValueIfExists([string]$Path, [string]$Name) {
@@ -169,11 +188,12 @@ function Invoke-ReleaseUninstall {
     if ($state -and $state.msixPackageName) { $hasWidget = $true }
     if ($hasWidget) {
         Write-UninstallHost '[MSIX] Removing Game Bar widget...' Cyan
-        Remove-OverlayWidgetMsix -All:$AllUsers
+        Remove-OverlayWidgetMsix -All:$AllUsers -State $state
     }
 
     Remove-OverlayCertFromState -State $state
     Remove-OverlayShortcuts -RootDir $InstallDir
+    Remove-CoreLocationRegistry
     Remove-UninstallRegistry
 
     if (Test-Path $InstallDir) {
@@ -196,7 +216,7 @@ if ($Release) {
 }
 
 Write-UninstallHost '[1/2] Removing OverlayWidget MSIX packages...' Cyan
-Remove-OverlayWidgetMsix -All:$AllUsers
+Remove-OverlayWidgetMsix -All:$AllUsers -State $null
 
 if ($RemoveCert) {
     Write-UninstallHost '[2/2] Removing dev cert from LocalMachine\TrustedPeople...' Cyan

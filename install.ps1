@@ -29,7 +29,11 @@ param(
     [switch]$CreateDesktopShortcut,
     [switch]$CreateStartMenu,
     [switch]$Quiet,
-    [switch]$SkipUninstallRegistry
+    [switch]$SkipUninstallRegistry,
+    [string]$LogPath,
+
+    [ValidateSet('Standalone', 'Inno')]
+    [string]$InstallHost = 'Standalone'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,6 +50,7 @@ $ScheduledTaskName = 'overlay-engine Core'
 $StartupShortcutName = 'overlay-engine.lnk'
 $StartupApprovedEnabled = [byte[]](0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 $AppName = 'overlay-engine'
+$CoreRegistryKey = 'HKCU:\Software\overlay-engine\Core'
 
 function Write-InstallHost([string]$Message, [ConsoleColor]$Color = [ConsoleColor]::Gray) {
     if (-not $Quiet) { Write-Host $Message -ForegroundColor $Color }
@@ -142,15 +147,33 @@ function Copy-FileRequired([string]$Source, [string]$Destination) {
     Copy-Item -Path $Source -Destination $Destination -Force
 }
 
-function Stop-InstalledProcess([string]$Name, [string]$RootDir) {
+function Test-PathInsideRoot([string]$Path, [string]$RootDir) {
+    if (-not $Path -or -not $RootDir) { return $false }
     $rootFull = [System.IO.Path]::GetFullPath($RootDir).TrimEnd('\')
+    $full = [System.IO.Path]::GetFullPath($Path)
+    return $full.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $full.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-ReleaseManifest([string]$RootDir) {
+    $manifestPath = Join-Path $RootDir 'manifest.json'
+    if (-not (Test-Path $manifestPath)) { return $null }
+    try { return Get-Content -Path $manifestPath -Raw | ConvertFrom-Json } catch { return $null }
+}
+
+function Get-ReleaseVersion([string]$RootDir) {
+    $manifest = Get-ReleaseManifest -RootDir $RootDir
+    if ($manifest -and $manifest.version) { return [string]$manifest.version }
+    return '0.1.3'
+}
+
+function Stop-InstalledProcess([string]$Name, [string]$RootDir) {
     $targets = New-Object 'System.Collections.Generic.List[int]'
     $filter = "Name = '$Name.exe'"
 
     foreach ($p in @(Get-CimInstance Win32_Process -Filter $filter -ErrorAction SilentlyContinue)) {
         if (-not $p.ExecutablePath) { continue }
-        $full = [System.IO.Path]::GetFullPath($p.ExecutablePath)
-        if ($full.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -and -not $targets.Contains([int]$p.ProcessId)) {
+        if ((Test-PathInsideRoot -Path $p.ExecutablePath -RootDir $RootDir) -and -not $targets.Contains([int]$p.ProcessId)) {
             $targets.Add([int]$p.ProcessId)
         }
     }
@@ -159,8 +182,7 @@ function Stop-InstalledProcess([string]$Name, [string]$RootDir) {
         $path = $null
         try { $path = $p.MainModule.FileName } catch { }
         if (-not $path) { continue }
-        $full = [System.IO.Path]::GetFullPath($path)
-        if ($full.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -and -not $targets.Contains([int]$p.Id)) {
+        if ((Test-PathInsideRoot -Path $path -RootDir $RootDir) -and -not $targets.Contains([int]$p.Id)) {
             $targets.Add([int]$p.Id)
         }
     }
@@ -185,7 +207,8 @@ function New-ShortcutFile(
     [string]$TargetPath,
     [string]$Arguments,
     [string]$WorkingDirectory,
-    [string]$Description
+    [string]$Description,
+    [string]$IconLocation
 ) {
     $parent = Split-Path -Parent $Path
     if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
@@ -195,6 +218,7 @@ function New-ShortcutFile(
     $shortcut.Arguments = $Arguments
     $shortcut.WorkingDirectory = $WorkingDirectory
     $shortcut.Description = $Description
+    if ($IconLocation) { $shortcut.IconLocation = $IconLocation }
     $shortcut.Save()
 }
 
@@ -206,21 +230,40 @@ function New-LauncherScripts([string]$RootDir) {
 
     Set-Content -Path $startScript -Encoding UTF8 -Value @'
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
+$root = [System.IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\')
 $core = Join-Path $root 'core-server.exe'
-Start-Process -FilePath $core -WorkingDirectory $root -WindowStyle Hidden
+$alreadyRunning = $false
+foreach ($p in @(Get-Process -Name 'core-server' -ErrorAction SilentlyContinue)) {
+    $path = $null
+    try { $path = $p.MainModule.FileName } catch { }
+    if (-not $path) { continue }
+    $full = [System.IO.Path]::GetFullPath($path)
+    if ($full.Equals($core, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $alreadyRunning = $true
+        break
+    }
+}
+if (-not $alreadyRunning) {
+    Start-Process -FilePath $core -WorkingDirectory $root -WindowStyle Hidden
+}
 '@
 
     Set-Content -Path $stopScript -Encoding UTF8 -Value @'
 $ErrorActionPreference = 'SilentlyContinue'
 $root = [System.IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\')
+function Test-PathInsideRoot([string]$Path, [string]$RootDir) {
+    if (-not $Path -or -not $RootDir) { return $false }
+    $rootFull = [System.IO.Path]::GetFullPath($RootDir).TrimEnd('\')
+    $full = [System.IO.Path]::GetFullPath($Path)
+    return $full.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $full.StartsWith($rootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
 foreach ($name in @('core-server', 'desktop-window-monitor')) {
     foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
         $path = $null
         try { $path = $p.MainModule.FileName } catch { }
         if (-not $path) { continue }
-        $full = [System.IO.Path]::GetFullPath($path)
-        if ($full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if (Test-PathInsideRoot -Path $path -RootDir $root) {
             Stop-Process -Id $p.Id -Force
         }
     }
@@ -265,12 +308,14 @@ function Unregister-OverlayAutoStart {
 
 function New-OverlayShortcuts([string]$RootDir, [bool]$Desktop, [bool]$StartMenu) {
     $ps = Get-PowerShellShortcutTarget
-    $startArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $RootDir 'Start-overlay-engine.ps1')`""
-    $stopArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $RootDir 'Stop-overlay-engine.ps1')`""
+    $startArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$(Join-Path $RootDir 'Start-overlay-engine.ps1')`""
+    $stopArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$(Join-Path $RootDir 'Stop-overlay-engine.ps1')`""
+    $icon = Join-Path $RootDir 'core-server.exe'
+    $iconLocation = if (Test-Path $icon) { "$icon,0" } else { $null }
 
     if ($Desktop) {
         $desktopDir = [Environment]::GetFolderPath('DesktopDirectory')
-        New-ShortcutFile -Path (Join-Path $desktopDir 'overlay-engine.lnk') -TargetPath $ps -Arguments $startArgs -WorkingDirectory $RootDir -Description 'Start overlay-engine'
+        New-ShortcutFile -Path (Join-Path $desktopDir 'overlay-engine.lnk') -TargetPath $ps -Arguments $startArgs -WorkingDirectory $RootDir -Description 'Start overlay-engine' -IconLocation $iconLocation
     }
 
     $programs = [Environment]::GetFolderPath('Programs')
@@ -279,27 +324,55 @@ function New-OverlayShortcuts([string]$RootDir, [bool]$Desktop, [bool]$StartMenu
     if (Test-Path $oldGameBarLink) { Remove-Item $oldGameBarLink -Force }
 
     if ($StartMenu) {
-        New-ShortcutFile -Path (Join-Path $group 'Start overlay-engine.lnk') -TargetPath $ps -Arguments $startArgs -WorkingDirectory $RootDir -Description 'Start overlay-engine'
-        New-ShortcutFile -Path (Join-Path $group 'Stop overlay-engine.lnk') -TargetPath $ps -Arguments $stopArgs -WorkingDirectory $RootDir -Description 'Stop overlay-engine'
+        New-ShortcutFile -Path (Join-Path $group 'Start overlay-engine.lnk') -TargetPath $ps -Arguments $startArgs -WorkingDirectory $RootDir -Description 'Start overlay-engine' -IconLocation $iconLocation
+        New-ShortcutFile -Path (Join-Path $group 'Stop overlay-engine.lnk') -TargetPath $ps -Arguments $stopArgs -WorkingDirectory $RootDir -Description 'Stop overlay-engine' -IconLocation $iconLocation
         $uninstallScript = Join-Path $RootDir 'scripts\uninstall.ps1'
         $uninstallArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$uninstallScript`" -Release -InstallDir `"$RootDir`""
-        New-ShortcutFile -Path (Join-Path $group 'Uninstall overlay-engine.lnk') -TargetPath $ps -Arguments $uninstallArgs -WorkingDirectory $RootDir -Description 'Uninstall overlay-engine'
+        New-ShortcutFile -Path (Join-Path $group 'Uninstall overlay-engine.lnk') -TargetPath $ps -Arguments $uninstallArgs -WorkingDirectory $RootDir -Description 'Uninstall overlay-engine' -IconLocation $iconLocation
     }
 }
 
-function Write-UninstallRegistry([string]$RootDir) {
+function Write-UninstallRegistry([string]$RootDir, [string]$Version) {
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\overlay-engine'
     if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
     $uninstallScript = Join-Path $RootDir 'scripts\uninstall.ps1'
     $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$uninstallScript`" -Release -InstallDir `"$RootDir`""
     New-ItemProperty -Path $key -Name DisplayName -Value 'overlay-engine' -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $key -Name DisplayVersion -Value '0.1.2' -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $key -Name DisplayVersion -Value $Version -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Publisher -Value 'overlay-engine' -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name InstallLocation -Value $RootDir -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $key -Name DisplayIcon -Value (Join-Path $RootDir 'core-server.exe') -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name UninstallString -Value $cmd -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name QuietUninstallString -Value "$cmd -Quiet" -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name NoModify -Value 1 -PropertyType DWord -Force | Out-Null
     New-ItemProperty -Path $key -Name NoRepair -Value 1 -PropertyType DWord -Force | Out-Null
+}
+
+function Write-CoreLocationRegistry([string]$RootDir, [string]$Version) {
+    $coreExe = Join-Path $RootDir 'core-server.exe'
+    if (-not (Test-Path $coreExe)) { throw "Core executable not found: $coreExe" }
+    if (-not (Test-Path $CoreRegistryKey)) { New-Item -Path $CoreRegistryKey -Force | Out-Null }
+    New-ItemProperty -Path $CoreRegistryKey -Name InstallDir -Value $RootDir -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $CoreRegistryKey -Name CoreExe -Value $coreExe -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $CoreRegistryKey -Name Version -Value $Version -PropertyType String -Force | Out-Null
+}
+
+function Get-InstalledAppxPackageInfo([string]$Name) {
+    $pkg = Get-AppxPackage -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $pkg) { return $null }
+    return [ordered]@{
+        name = [string]$pkg.Name
+        packageFullName = [string]$pkg.PackageFullName
+        publisher = [string]$pkg.Publisher
+        version = [string]$pkg.Version
+    }
+}
+
+function Get-CertificateThumbprint([string]$CertificatePath) {
+    if (-not $CertificatePath -or -not (Test-Path $CertificatePath)) { return $null }
+    $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($CertificatePath)
+    try { return [string]$cert.Thumbprint }
+    finally { $cert.Dispose() }
 }
 
 function Invoke-ReleaseInstall {
@@ -320,8 +393,12 @@ function Invoke-ReleaseInstall {
     Write-InstallHost 'overlay-engine Release Install' White
     Write-InstallHost "  SourceDir    : $SourceDir" DarkGray
     Write-InstallHost "  InstallDir   : $InstallDir" DarkGray
+    $releaseVersion = Get-ReleaseVersion -RootDir $SourceDir
+
     Write-InstallHost "  Components   : $($Components -join ', ')" DarkGray
     Write-InstallHost "  AutoStart    : $AutoStart" DarkGray
+    Write-InstallHost "  InstallHost  : $InstallHost" DarkGray
+    Write-InstallHost "  Version      : $releaseVersion" DarkGray
 
     Stop-InstalledProcess -Name 'core-server' -RootDir $InstallDir
     Stop-InstalledProcess -Name 'desktop-window-monitor' -RootDir $InstallDir
@@ -362,6 +439,8 @@ function Invoke-ReleaseInstall {
     New-LauncherScripts -RootDir $InstallDir
 
     $installedWidget = $false
+    $devCert = $null
+    $widgetPackage = $null
     if (Test-Component 'GameBarWidget') {
         $widgetScript = Join-Path $InstallDir 'scripts\game-bar-widget-install.ps1'
         if (-not (Test-Path $widgetScript)) { $widgetScript = Join-Path $scriptsSource 'game-bar-widget-install.ps1' }
@@ -373,29 +452,48 @@ function Invoke-ReleaseInstall {
         if (Test-Path $depDir) { $args += @('-DependencyDir', $depDir) }
         $devCert = Join-Path $widgetSource 'OverlayWidget_Dev.cer'
         if (Test-Path $devCert) { $args += @('-TrustDevCertificate', '-DevCertPath', $devCert) }
-        & powershell.exe @args
-        if ($LASTEXITCODE -ne 0) { throw "Game Bar widget install failed: exit $LASTEXITCODE" }
+        if ($LogPath) {
+            & powershell.exe @args *>&1 | Tee-Object -FilePath $LogPath -Append
+            $widgetExitCode = $LASTEXITCODE
+        }
+        else {
+            & powershell.exe @args
+            $widgetExitCode = $LASTEXITCODE
+        }
+        if ($widgetExitCode -ne 0) { throw "Game Bar widget install failed: exit $widgetExitCode" }
         $installedWidget = $true
+        $widgetPackage = Get-InstalledAppxPackageInfo -Name 'OverlayWidget'
     }
 
+    Write-CoreLocationRegistry -RootDir $InstallDir -Version $releaseVersion
+
     if ($AutoStart) { Register-OverlayAutoStart -RootDir $InstallDir } else { Unregister-OverlayAutoStart }
-    New-OverlayShortcuts -RootDir $InstallDir -Desktop:$CreateDesktopShortcut -StartMenu:$CreateStartMenu
+    if ($InstallHost -eq 'Standalone') {
+        New-OverlayShortcuts -RootDir $InstallDir -Desktop:$CreateDesktopShortcut -StartMenu:$CreateStartMenu
+    }
 
     $state = [ordered]@{
         installDir = $InstallDir
-        version = '0.1.2'
+        installHost = $InstallHost
+        version = $releaseVersion
         components = @($Components)
         autoStart = [bool]$AutoStart
         desktopShortcut = [bool]$CreateDesktopShortcut
         startMenu = [bool]$CreateStartMenu
+        shortcutsOwner = if ($InstallHost -eq 'Inno') { 'Inno' } else { 'PowerShell' }
+        uninstallOwner = if ($InstallHost -eq 'Inno') { 'Inno' } else { 'PowerShell' }
         startupRegistryValueName = if ($AutoStart) { $AppName } else { $null }
         scheduledTaskName = $null
         msixPackageName = if ($installedWidget) { 'OverlayWidget' } else { $null }
+        msixPackageFullName = if ($widgetPackage) { $widgetPackage.packageFullName } else { $null }
+        msixPublisher = if ($widgetPackage) { $widgetPackage.publisher } else { $null }
+        certificateThumbprint = Get-CertificateThumbprint -CertificatePath $devCert
+        coreRegistryKey = 'HKCU:\Software\overlay-engine\Core'
         installedAt = (Get-Date).ToString('o')
     }
-    $state | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $InstallDir 'install-state.json') -Encoding UTF8
+    $state | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $InstallDir 'install-state.json') -Encoding UTF8
 
-    if (-not $SkipUninstallRegistry) { Write-UninstallRegistry -RootDir $InstallDir }
+    if (-not $SkipUninstallRegistry -and $InstallHost -eq 'Standalone') { Write-UninstallRegistry -RootDir $InstallDir -Version $releaseVersion }
 
     Write-InstallHost ''
     Write-InstallHost 'Release install complete.' Green
@@ -403,7 +501,28 @@ function Invoke-ReleaseInstall {
 }
 
 if ($Release) {
-    Invoke-ReleaseInstall
+    if ($LogPath) {
+        $logParent = Split-Path -Parent $LogPath
+        if ($logParent -and -not (Test-Path $logParent)) { New-Item -ItemType Directory -Path $logParent -Force | Out-Null }
+        Set-Content -Path $LogPath -Encoding UTF8 -Value @(
+            'overlay-engine install backend log',
+            "Started: $((Get-Date).ToString('o'))"
+        )
+        try {
+            Invoke-ReleaseInstall
+            Add-Content -Path $LogPath -Encoding UTF8 -Value "Completed: $((Get-Date).ToString('o'))"
+        }
+        catch {
+            Add-Content -Path $LogPath -Encoding UTF8 -Value @(
+                "ERROR: $($_.Exception.Message)",
+                "STACK: $($_.ScriptStackTrace)"
+            )
+            throw
+        }
+    }
+    else {
+        Invoke-ReleaseInstall
+    }
     return
 }
 

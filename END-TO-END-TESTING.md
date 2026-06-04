@@ -40,18 +40,18 @@ Release 包不发布 `demo-app`、`demo-consumer` 或诊断/实验程序；demo 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts/build-release.ps1" `
   -Configuration Release `
   -Platform x64 `
-  -Version 0.1.2 `
+  -Version 0.1.3 `
   -SignMode Dev
 ```
 
-确认 `dist\overlay-engine-0.1.2-x64\app` 中只有正式组件，不能出现 `demo-*.exe`、`spike-*.exe` 或 `diag-*.exe`。
+确认 `dist\overlay-engine-0.1.3-x64\manifest.json` 的版本为 `0.1.3`，`widget` 目录中的 MSIX 为 `OverlayWidget_0.1.3.0_x64.msix`，且 `dist\overlay-engine-0.1.3-x64\app` 中只有正式组件，不能出现 `demo-*.exe`、`spike-*.exe` 或 `diag-*.exe`。
 
 ### Core + Desktop monitor
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.2-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.3-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.2-x64" `
+  -SourceDir "dist/overlay-engine-0.1.3-x64" `
   -Components Core,DesktopMonitor `
   -CreateDesktopShortcut `
   -CreateStartMenu
@@ -67,10 +67,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 
 ### Core + Game Bar widget
 
+内部 `-SignMode Dev` 包如果尚未信任 `OverlayWidget_Dev.cer`，安装会在证书信任步骤弹出 UAC；确认 UAC 后脚本会回到当前用户上下文继续执行 `Add-AppxPackage`。
+
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.2-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.3-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.2-x64" `
+  -SourceDir "dist/overlay-engine-0.1.3-x64" `
   -Components Core,GameBarWidget `
   -CreateStartMenu
 ```
@@ -80,14 +82,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 1. 按 `Win+G` 打开 Xbox Game Bar。
 2. 小组件列表里能看到并打开 `Overlay Widget`。
 3. Game Bar widget 能连接已启动的 core-server。
-4. 卸载时 MSIX 被移除；如果是内部 dev cert 测试包，只有显式传 `-RemoveCert` 才删除导入的证书。
+4. `install-state.json` 记录了 `msixPackageFullName`、`msixPublisher` 和 dev cert thumbprint。
+5. 卸载时优先按记录的 `PackageFullName` 精确移除 MSIX；如果是内部 dev cert 测试包，只有显式传 `-RemoveCert` 才删除导入的证书。
 
 ### AutoStart 与完整卸载
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.2-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.3-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.2-x64" `
+  -SourceDir "dist/overlay-engine-0.1.3-x64" `
   -Components Core,DesktopMonitor,GameBarWidget `
   -AutoStart `
   -CreateDesktopShortcut `
@@ -97,9 +100,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 验证点：
 
 1. 当前用户 `Run` 自启项 `overlay-engine` 存在，命令经 `powershell.exe -WindowStyle Hidden` 调用 `Start-overlay-engine.ps1`。
-2. 注销/重新登录后只隐藏启动 core-server，工作目录仍是安装目录，且不出现控制台窗口。
-3. `config.ini` 生效，Core 能报告 Desktop/Game Bar monitor 能力，但不会自动拉起 Desktop monitor。
-4. 执行卸载后自启项、快捷方式、开始菜单、MSIX、安装目录和卸载注册表项都被清理。
+2. `HKCU:\Software\overlay-engine\Core` 存在，且 `InstallDir` 指向安装目录、`CoreExe` 指向安装目录里的 `core-server.exe`、`Version` 为当前安装版本。
+3. 停止 Core 后启动 app，app 能在 `\\.\pipe\overlay-core` 不存在时读取 `CoreExe` 并隐藏唤起 Core。
+4. 注销/重新登录后只隐藏启动 core-server，工作目录仍是安装目录，且不出现控制台窗口。
+5. `config.ini` 生效，Core 能报告 Desktop/Game Bar monitor 能力，但不会自动拉起 Desktop monitor。
+6. Desktop monitor 窗口、任务栏/Alt-Tab、开始菜单快捷方式和 Setup.exe 都显示新的 overlay-engine 图标；快捷方式不应显示 PowerShell 默认图标。
+7. 执行卸载后自启项、Core 定位注册表、快捷方式、开始菜单、MSIX、安装目录和卸载注册表项都被清理。
 
 ---
 

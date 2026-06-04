@@ -39,11 +39,12 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetWindowLongPtrW, LoadCursorW, PeekMessageW, RegisterClassExW, SetWindowLongPtrW,
-    SetWindowTextW, ShowWindow, TranslateMessage, GWLP_USERDATA, HTTRANSPARENT, IDC_ARROW, MSG,
-    PM_REMOVE, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_NCHITTEST, WM_QUIT, WM_WINDOWPOSCHANGED,
-    WNDCLASSEXW, WNDCLASS_STYLES, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TRANSPARENT,
-    WS_OVERLAPPEDWINDOW, WS_POPUP,
+    GetWindowLongPtrW, LoadCursorW, LoadImageW, PeekMessageW, RegisterClassExW, SendMessageW,
+    SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage, GWLP_USERDATA, HICON,
+    HTTRANSPARENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED, MSG,
+    PM_REMOVE, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_NCHITTEST, WM_QUIT, WM_SETICON,
+    WM_WINDOWPOSCHANGED, WNDCLASSEXW, WNDCLASS_STYLES, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 
 const PIPE_NAME: &str = r"\\.\pipe\overlay-core";
@@ -51,6 +52,7 @@ const RECONNECT_BACKOFF_MS: &[u64] = &[500, 1000, 2000];
 const RECONNECT_MAX_ATTEMPTS: u32 = 10;
 const LAUNCHER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
 const LAUNCHER_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const DESKTOP_MONITOR_ICON_ID: usize = 1;
 
 struct ViewportState {
     visual: IDCompositionVisual2,
@@ -255,9 +257,7 @@ fn install_viewport_state(hwnd: HWND, state: ViewportState) {
     }
 }
 
-async fn read_next_control_message(
-    pipe: &mut NamedPipeClient,
-) -> anyhow::Result<Option<ControlMessage>> {
+async fn read_next_control_message(pipe: &mut NamedPipeClient) -> anyhow::Result<ControlMessage> {
     let mut header_buf = [0u8; HEADER_SIZE];
     pipe.read_exact(&mut header_buf).await?;
 
@@ -271,11 +271,7 @@ async fn read_next_control_message(
         buf.extend_from_slice(&payload_buf);
     }
 
-    Ok(ControlMessage::decode(
-        header.opcode,
-        header.payload_len,
-        &mut buf,
-    )?)
+    ControlMessage::decode(header.opcode, header.payload_len, &mut buf).map_err(Into::into)
 }
 
 async fn connect_to_core() -> anyhow::Result<NamedPipeClient> {
@@ -300,21 +296,15 @@ async fn register_and_wait_attach(
     println!("[desktop-monitor] connecting to {}", PIPE_NAME);
     let mut pipe = connect_to_core().await?;
 
-    let msg = if options.core_requested() {
-        ControlMessage::RegisterMonitorV2 {
-            pid: std::process::id(),
-            kind: MonitorKind::DesktopWindow,
-            owner_app_id: options.owner_app_id_wire(),
-            request_id: options.request_id,
-            target_canvas_id: options.target_canvas_id,
-            mode: options.mode,
-            flags: options.flags,
-            manual_lifecycle: false,
-        }
-    } else {
-        ControlMessage::RegisterMonitor {
-            pid: std::process::id(),
-        }
+    let msg = ControlMessage::RegisterMonitor {
+        pid: std::process::id(),
+        kind: MonitorKind::DesktopWindow,
+        owner_app_id: options.owner_app_id_wire(),
+        request_id: options.request_id,
+        target_canvas_id: options.target_canvas_id,
+        mode: options.mode,
+        flags: options.flags,
+        manual_lifecycle: !options.core_requested(),
     };
     let mut buf = BytesMut::new();
     msg.encode(&mut buf);
@@ -324,14 +314,14 @@ async fn register_and_wait_attach(
 
     let attach = loop {
         match read_next_control_message(&mut pipe).await? {
-            Some(ControlMessage::CanvasAttached {
+            ControlMessage::CanvasAttached {
                 canvas_id,
                 surface_handle,
                 logical_w,
                 logical_h,
                 render_w,
                 render_h,
-            }) if options.target_canvas_id == 0 || canvas_id == options.target_canvas_id => {
+            } if options.target_canvas_id == 0 || canvas_id == options.target_canvas_id => {
                 break CanvasAttach {
                     canvas_id,
                     surface_handle,
@@ -341,22 +331,21 @@ async fn register_and_wait_attach(
                     render_h,
                 };
             }
-            Some(ControlMessage::CanvasAttached { canvas_id, .. }) => {
+            ControlMessage::CanvasAttached { canvas_id, .. } => {
                 eprintln!(
                     "[desktop-monitor] skipping CanvasAttached canvas={} while waiting for target canvas={}",
                     canvas_id, options.target_canvas_id
                 );
             }
-            Some(ControlMessage::CloseMonitor { monitor_id }) => {
+            ControlMessage::CloseMonitor { monitor_id } => {
                 anyhow::bail!("Core closed monitor {} before CanvasAttached", monitor_id);
             }
-            Some(other) => {
+            other => {
                 eprintln!(
                     "[desktop-monitor] unexpected message before CanvasAttached: {:?}",
                     other
                 );
             }
-            None => {}
         }
     };
 
@@ -580,6 +569,48 @@ fn fullscreen_rect_for_options(options: DesktopWindowOptions) -> (i32, i32, i32,
     }
 }
 
+fn load_desktop_monitor_icon(hinst: HINSTANCE) -> Option<HICON> {
+    let icon_name = PCWSTR(DESKTOP_MONITOR_ICON_ID as *const u16);
+    let handle = unsafe {
+        LoadImageW(
+            Some(hinst),
+            icon_name,
+            IMAGE_ICON,
+            0,
+            0,
+            LR_DEFAULTSIZE | LR_SHARED,
+        )
+    };
+    match handle {
+        Ok(handle) => Some(HICON(handle.0)),
+        Err(e) => {
+            eprintln!(
+                "[desktop-monitor] LoadImageW(resource #{DESKTOP_MONITOR_ICON_ID}) failed: {e} \
+                 (continuing without a custom window icon)"
+            );
+            None
+        }
+    }
+}
+
+fn apply_window_icon(hwnd: HWND, icon: HICON) {
+    unsafe {
+        let lparam = LPARAM(icon.0 as isize);
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(lparam),
+        );
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_SMALL as usize)),
+            Some(lparam),
+        );
+    }
+}
+
 fn create_monitor_hwnd(options: DesktopWindowOptions) -> anyhow::Result<HWND> {
     let hinst = unsafe { GetModuleHandleW(None)? };
     let class_name = w!("OverlayDesktopMonitor");
@@ -618,12 +649,16 @@ fn create_monitor_hwnd(options: DesktopWindowOptions) -> anyhow::Result<HWND> {
             None,
         )?
     };
+    if let Some(icon) = load_desktop_monitor_icon(hinst.into()) {
+        apply_window_icon(hwnd, icon);
+    }
     Ok(hwnd)
 }
 
 fn register_window_class() -> anyhow::Result<()> {
     let hinst = unsafe { GetModuleHandleW(None)? };
     let class_name = w!("OverlayDesktopMonitor");
+    let icon = load_desktop_monitor_icon(hinst.into());
     let wcex = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
         style: WNDCLASS_STYLES::default(),
@@ -631,6 +666,8 @@ fn register_window_class() -> anyhow::Result<()> {
         hInstance: hinst.into(),
         lpszClassName: class_name,
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
+        hIcon: icon.unwrap_or_default(),
+        hIconSm: icon.unwrap_or_default(),
         ..Default::default()
     };
     unsafe { RegisterClassExW(&wcex) };
@@ -668,7 +705,7 @@ fn spawn_pipe_reader(id: u32, mut pipe: NamedPipeClient, tx: mpsc::Sender<PipeEv
     tokio::spawn(async move {
         loop {
             match read_next_control_message(&mut pipe).await {
-                Ok(Some(msg)) => {
+                Ok(msg) => {
                     if tx
                         .send(PipeEvent::Message { window_id: id, msg })
                         .await
@@ -677,7 +714,6 @@ fn spawn_pipe_reader(id: u32, mut pipe: NamedPipeClient, tx: mpsc::Sender<PipeEv
                         break;
                     }
                 }
-                Ok(None) => {}
                 Err(e) => {
                     let _ = tx
                         .send(PipeEvent::Disconnected {
