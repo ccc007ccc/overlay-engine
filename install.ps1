@@ -236,8 +236,9 @@ function Remove-RegistryValueIfExists([string]$Path, [string]$Name) {
 
 function Register-OverlayAutoStart([string]$RootDir) {
     Unregister-OverlayAutoStart
-    $core = Join-Path $RootDir 'core-server.exe'
-    $cmd = "`"$core`""
+    $ps = Get-PowerShellShortcutTarget
+    $startScript = Join-Path $RootDir 'Start-overlay-engine.ps1'
+    $cmd = "`"$ps`" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$startScript`""
 
     $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
     if (-not (Test-Path $runKey)) { New-Item -Path $runKey -Force | Out-Null }
@@ -292,7 +293,7 @@ function Write-UninstallRegistry([string]$RootDir) {
     $uninstallScript = Join-Path $RootDir 'scripts\uninstall.ps1'
     $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$uninstallScript`" -Release -InstallDir `"$RootDir`""
     New-ItemProperty -Path $key -Name DisplayName -Value 'overlay-engine' -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $key -Name DisplayVersion -Value '0.1.1' -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $key -Name DisplayVersion -Value '0.1.2' -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name Publisher -Value 'overlay-engine' -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name InstallLocation -Value $RootDir -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $key -Name UninstallString -Value $cmd -PropertyType String -Force | Out-Null
@@ -382,7 +383,7 @@ function Invoke-ReleaseInstall {
 
     $state = [ordered]@{
         installDir = $InstallDir
-        version = '0.1.1'
+        version = '0.1.2'
         components = @($Components)
         autoStart = [bool]$AutoStart
         desktopShortcut = [bool]$CreateDesktopShortcut

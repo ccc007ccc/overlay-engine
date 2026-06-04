@@ -40,18 +40,18 @@ Release 包不发布 `demo-app`、`demo-consumer` 或诊断/实验程序；demo 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts/build-release.ps1" `
   -Configuration Release `
   -Platform x64 `
-  -Version 0.1.1 `
+  -Version 0.1.2 `
   -SignMode Dev
 ```
 
-确认 `dist\overlay-engine-0.1.1-x64\app` 中只有正式组件，不能出现 `demo-*.exe`、`spike-*.exe` 或 `diag-*.exe`。
+确认 `dist\overlay-engine-0.1.2-x64\app` 中只有正式组件，不能出现 `demo-*.exe`、`spike-*.exe` 或 `diag-*.exe`。
 
 ### Core + Desktop monitor
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.1-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.2-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.1-x64" `
+  -SourceDir "dist/overlay-engine-0.1.2-x64" `
   -Components Core,DesktopMonitor `
   -CreateDesktopShortcut `
   -CreateStartMenu
@@ -68,9 +68,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 ### Core + Game Bar widget
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.1-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.2-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.1-x64" `
+  -SourceDir "dist/overlay-engine-0.1.2-x64" `
   -Components Core,GameBarWidget `
   -CreateStartMenu
 ```
@@ -85,9 +85,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 ### AutoStart 与完整卸载
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.1-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.2-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.1-x64" `
+  -SourceDir "dist/overlay-engine-0.1.2-x64" `
   -Components Core,DesktopMonitor,GameBarWidget `
   -AutoStart `
   -CreateDesktopShortcut `
@@ -96,10 +96,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 
 验证点：
 
-1. 当前用户计划任务 `overlay-engine Core` 存在。
-2. 注销/重新登录后只自动启动 core-server，工作目录仍是安装目录。
+1. 当前用户 `Run` 自启项 `overlay-engine` 存在，命令经 `powershell.exe -WindowStyle Hidden` 调用 `Start-overlay-engine.ps1`。
+2. 注销/重新登录后只隐藏启动 core-server，工作目录仍是安装目录，且不出现控制台窗口。
 3. `config.ini` 生效，Core 能报告 Desktop/Game Bar monitor 能力，但不会自动拉起 Desktop monitor。
-4. 执行卸载后计划任务、快捷方式、开始菜单、MSIX、安装目录和卸载注册表项都被清理。
+4. 执行卸载后自启项、快捷方式、开始菜单、MSIX、安装目录和卸载注册表项都被清理。
 
 ---
 

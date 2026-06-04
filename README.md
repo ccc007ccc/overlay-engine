@@ -40,9 +40,9 @@ overlay-engine 是 Windows overlay 渲染栈，由一个必选的 Core Server �
 维护者或内部测试可以直接安装 release staging：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.1-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.2-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.1-x64" `
+  -SourceDir "dist/overlay-engine-0.1.2-x64" `
   -InstallDir "$env:LOCALAPPDATA\Programs\overlay-engine" `
   -Components Core,DesktopMonitor,GameBarWidget `
   -AutoStart `
@@ -53,9 +53,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 只安装 Core + Desktop Window Monitor：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.1-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.2-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.1-x64" `
+  -SourceDir "dist/overlay-engine-0.1.2-x64" `
   -Components Core,DesktopMonitor
 ```
 
@@ -72,7 +72,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Progr
   -RemoveWidget
 ```
 
-卸载会清理安装器创建的计划任务、快捷方式、Game Bar MSIX 和安装目录。默认保留用户数据；如需删除本地数据，添加 `-RemoveUserData`。
+卸载会清理安装器创建的自启项、快捷方式、Game Bar MSIX 和安装目录。默认保留用户数据；如需删除本地数据，添加 `-RemoveUserData`。
 
 ## 构建 release
 

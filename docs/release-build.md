@@ -16,14 +16,14 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts/build-release.ps1" `
   -Configuration Release `
   -Platform x64 `
-  -Version 0.1.1 `
+  -Version 0.1.2 `
   -SignMode Dev
 ```
 
 输出目录：
 
 ```text
-dist\overlay-engine-0.1.1-x64\
+dist\overlay-engine-0.1.2-x64\
   app\
     core-server.exe
     desktop-window-monitor.exe
@@ -58,7 +58,7 @@ iscc.exe "installer/overlay-engine.iss"
 输出：
 
 ```text
-dist\overlay-engine-0.1.1-x64-Setup.exe
+dist\overlay-engine-0.1.2-x64-Setup.exe
 ```
 
 安装器提供这些组件/任务：
@@ -75,9 +75,9 @@ dist\overlay-engine-0.1.1-x64-Setup.exe
 不生成 Inno 安装器时，可以直接运行 PowerShell 后端：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.1-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.2-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.1-x64" `
+  -SourceDir "dist/overlay-engine-0.1.2-x64" `
   -InstallDir "$env:LOCALAPPDATA\Programs\overlay-engine" `
   -Components Core,DesktopMonitor,GameBarWidget `
   -AutoStart `
@@ -97,7 +97,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Progr
 验证卸载后：
 
 - `core-server.exe` 和 `desktop-window-monitor.exe` 已停止。
-- 计划任务 `overlay-engine Core` 已删除。
+- 当前用户 `Run` 自启项 `overlay-engine` 已删除。
 - 桌面和开始菜单快捷方式已删除。
 - Game Bar MSIX 已卸载。
 - 安装目录已删除。
@@ -108,5 +108,5 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Progr
 2. 确认 core-server 读取安装目录下的 `config.ini`，且不会自动拉起 `desktop-window-monitor.exe`。
 3. 用 app 发送 `ListMonitorTypes` 能看到 Desktop Window Monitor 能力；发送 `StartMonitor` 后才出现 Desktop 窗口，app 退出后窗口关闭。
 4. 安装 Game Bar widget 后，按 `Win+G` 打开 Xbox Game Bar，确认能打开 `Overlay Widget`；Core 不负责唤起或关闭它。
-5. 选择开机自启后，注销/重新登录，确认 `overlay-engine Core` 计划任务触发并只启动 core-server。
-6. 卸载后确认没有残留计划任务、快捷方式、MSIX 和安装目录。
+5. 选择开机自启后，注销/重新登录，确认当前用户 `Run` 自启项触发并隐藏启动 core-server，不出现控制台窗口。
+6. 卸载后确认没有残留自启项、快捷方式、MSIX 和安装目录。
