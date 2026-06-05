@@ -1,6 +1,8 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     println!("Starting core-server...");
+    let _timer_resolution =
+        core_server::timer_resolution::HighResolutionTimerGuard::request_1ms("core-server");
 
     tokio::spawn(async {
         if let Ok(()) = tokio::signal::ctrl_c().await {

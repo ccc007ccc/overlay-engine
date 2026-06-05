@@ -184,7 +184,7 @@ namespace OverlayWidget.Native
                             _worldLayerUsesScreenSpace = true;
                             _worldLayer.MountSurface(new IntPtr(handleRaw), logW, logH);
                             EnsureRenderingSubscribed();
-                            MarkLayoutDirty();
+                            ResetTransformCache();
                             TryUpdateVisualTransform(force: true);
                             OnStatusChanged?.Invoke($"Attached World Canvas: {logW}x{logH}");
                         }
@@ -206,11 +206,11 @@ namespace OverlayWidget.Native
                     {
                         try
                         {
-                            _worldLayerUsesScreenSpace = false;
+                            _worldLayerUsesScreenSpace = true;
                             _mlLayer?.Clear();
                             _worldLayer.MountSurface(new IntPtr(handleRaw), logW, logH);
                             EnsureRenderingSubscribed();
-                            MarkLayoutDirty();
+                            ResetTransformCache();
                             TryUpdateVisualTransform(force: true);
                             OnStatusChanged?.Invoke($"Attached Composite Scene {sceneId}: {logW}x{logH} ({renderW}x{renderH})");
                         }
@@ -296,12 +296,20 @@ namespace OverlayWidget.Native
             {
                 _lastWindowRect = winRect;
                 _hasWindowRect = true;
-                _fastPollUntilTicks = now + FastTrackingTicks;
             }
 
-            if (_layoutDirty || force)
+            Point previousHostOrigin = _cachedHostOrigin;
+            double previousScale = _cachedScale;
+            bool wasLayoutDirty = _layoutDirty;
+            RefreshLayoutMetrics();
+            bool layoutChanged = wasLayoutDirty
+                || Math.Abs(previousHostOrigin.X - _cachedHostOrigin.X) > 0.1
+                || Math.Abs(previousHostOrigin.Y - _cachedHostOrigin.Y) > 0.1
+                || Math.Abs(previousScale - _cachedScale) > 0.01;
+
+            if (windowChanged || layoutChanged)
             {
-                RefreshLayoutMetrics();
+                _fastPollUntilTicks = now + FastTrackingTicks;
             }
 
             _nextWindowSampleTicks = now + (now < _fastPollUntilTicks ? FastPollTicks : IdlePollTicks);

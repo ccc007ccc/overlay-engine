@@ -11,13 +11,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 
 use windows::core::Interface;
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::CompositionSwapchain::{
     IPresentationBuffer, IPresentationManager, IPresentationSurface,
 };
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
-use windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Resource, ID3D11Texture2D, D3D11_BOX,
+    ID3D11DeviceContext, ID3D11DeviceContext1, ID3D11RenderTargetView, ID3D11Resource,
+    ID3D11Texture2D, ID3D11View, D3D11_BOX,
 };
 
 use crate::ipc::cmd_decoder::{BitmapDrawCommand, RenderCommand, SpaceId};
@@ -106,6 +106,9 @@ pub async fn run_server() -> anyhow::Result<()> {
 
     println!("Core Server listening on {}", PIPE_NAME);
 
+    let compositor = crate::compositor::CompositorScheduler::new();
+    crate::compositor::spawn_compositor_task(compositor.clone());
+
     loop {
         // Wait for a client to connect
         server.connect().await?;
@@ -147,8 +150,9 @@ pub async fn run_server() -> anyhow::Result<()> {
         }
 
         // Spawn a new task to handle the connected client
+        let client_compositor = compositor.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(connected_client).await {
+            if let Err(e) = handle_client(connected_client, client_compositor).await {
                 eprintln!("Client error: {:#}", e);
             }
         });
@@ -198,15 +202,22 @@ fn scan_targets(cmds: &[RenderCommand]) -> TargetUsage {
     }
 }
 
+enum RenderTargetPresent {
+    Presentation {
+        buffer: IPresentationBuffer,
+        surface: IPresentationSurface,
+        manager: IPresentationManager,
+    },
+    TextureOnly,
+}
+
 struct RenderTargetSnapshot {
     render_w: u32,
     render_h: u32,
     rtv: ID3D11RenderTargetView,
-    buffer: IPresentationBuffer,
     buffer_idx: usize,
     texture: ID3D11Texture2D,
-    surface: IPresentationSurface,
-    manager: IPresentationManager,
+    present: RenderTargetPresent,
     last_presented_idx: Option<Arc<AtomicUsize>>,
 }
 
@@ -215,39 +226,28 @@ struct SubmitFrameTargets {
     locals: HashMap<u32, RenderTargetSnapshot>,
 }
 
-struct CompositeLayerSnapshot {
-    canvas_id: u32,
-    z_order: u32,
-    x: i32,
-    y: i32,
-    logical_w: u32,
-    logical_h: u32,
-    source_textures: Vec<ID3D11Texture2D>,
-    last_presented_idx: Arc<AtomicUsize>,
-}
-
-struct CompositeSceneSnapshot {
-    monitor_id: u32,
-    scene_id: u32,
-    logical_w: u32,
-    logical_h: u32,
-    target: RenderTargetSnapshot,
-    layers: Vec<CompositeLayerSnapshot>,
-}
-
 fn snapshot_canvas_target(
     resources: &crate::renderer::dcomp::CanvasResources,
     idx: usize,
+    present_to_surface: bool,
 ) -> Option<RenderTargetSnapshot> {
+    let present = if present_to_surface {
+        RenderTargetPresent::Presentation {
+            buffer: resources.buffers.get(idx)?.clone(),
+            surface: resources.surface.clone(),
+            manager: resources.manager.clone(),
+        }
+    } else {
+        RenderTargetPresent::TextureOnly
+    };
+
     Some(RenderTargetSnapshot {
         render_w: resources.render_w,
         render_h: resources.render_h,
         rtv: resources.rtvs.get(idx)?.clone(),
-        buffer: resources.buffers.get(idx)?.clone(),
         buffer_idx: idx,
         texture: resources.textures.get(idx)?.clone(),
-        surface: resources.surface.clone(),
-        manager: resources.manager.clone(),
+        present,
         last_presented_idx: Some(resources.last_presented_idx.clone()),
     })
 }
@@ -260,11 +260,13 @@ fn snapshot_monitor_target(
         render_w: resources.render_w,
         render_h: resources.render_h,
         rtv: resources.rtvs.get(idx)?.clone(),
-        buffer: resources.buffers.get(idx)?.clone(),
         buffer_idx: idx,
         texture: resources.textures.get(idx)?.clone(),
-        surface: resources.surface.clone(),
-        manager: resources.manager.clone(),
+        present: RenderTargetPresent::Presentation {
+            buffer: resources.buffers.get(idx)?.clone(),
+            surface: resources.surface.clone(),
+            manager: resources.manager.clone(),
+        },
         last_presented_idx: None,
     })
 }
@@ -274,21 +276,30 @@ fn snapshot_submit_frame_targets(
     canvas_id: u32,
     frame_id: u64,
     usage: &TargetUsage,
+    present_world_to_surface: bool,
 ) -> SubmitFrameTargets {
     let world = if usage.world_used {
-        match canvas
-            .resources
-            .acquire_available_buffer(ACQUIRE_TIMEOUT_MS)
-        {
-            AcquireOutcome::Acquired(i) => snapshot_canvas_target(&canvas.resources, i),
-            AcquireOutcome::TimedOut => None,
-            AcquireOutcome::Failed(e) => {
-                eprintln!(
-                    "SubmitFrame: canvas={} frame={} World — acquire failed: {}",
-                    canvas_id, frame_id, e
-                );
-                None
+        if present_world_to_surface {
+            match canvas
+                .resources
+                .acquire_available_buffer(ACQUIRE_TIMEOUT_MS)
+            {
+                AcquireOutcome::Acquired(i) => snapshot_canvas_target(&canvas.resources, i, true),
+                AcquireOutcome::TimedOut => None,
+                AcquireOutcome::Failed(e) => {
+                    eprintln!(
+                        "SubmitFrame: canvas={} frame={} World — acquire failed: {}",
+                        canvas_id, frame_id, e
+                    );
+                    None
+                }
             }
+        } else {
+            snapshot_canvas_target(
+                &canvas.resources,
+                canvas.resources.next_compositor_write_idx(),
+                false,
+            )
         }
     } else {
         None
@@ -318,73 +329,6 @@ fn snapshot_submit_frame_targets(
     SubmitFrameTargets { world, locals }
 }
 
-fn snapshot_composite_scene_targets(
-    state: &crate::ipc::server::ServerState,
-    submitted_canvas_id: u32,
-    frame_id: u64,
-) -> Vec<CompositeSceneSnapshot> {
-    let mut scenes = Vec::new();
-
-    for (monitor_id, scene) in &state.monitor_scenes {
-        if !scene
-            .layers
-            .iter()
-            .any(|layer| layer.canvas_id == submitted_canvas_id)
-        {
-            continue;
-        }
-
-        let Some(output) = state.monitor_scene_outputs.get(monitor_id) else {
-            continue;
-        };
-        let target = match output.acquire_available_buffer(ACQUIRE_TIMEOUT_MS) {
-            AcquireOutcome::Acquired(i) => snapshot_monitor_target(output, i),
-            AcquireOutcome::TimedOut => None,
-            AcquireOutcome::Failed(e) => {
-                eprintln!(
-                    "SubmitFrame: canvas={} frame={} monitor={} composite — acquire failed: {}",
-                    submitted_canvas_id, frame_id, monitor_id, e
-                );
-                None
-            }
-        };
-        let Some(target) = target else {
-            continue;
-        };
-
-        let mut layers: Vec<_> = scene
-            .layers
-            .iter()
-            .filter(|layer| layer.window.visible)
-            .filter_map(|layer| {
-                let canvas = state.canvases.get(&layer.canvas_id)?;
-                Some(CompositeLayerSnapshot {
-                    canvas_id: layer.canvas_id,
-                    z_order: layer.z_order,
-                    x: layer.window.x,
-                    y: layer.window.y,
-                    logical_w: layer.window.logical_w,
-                    logical_h: layer.window.logical_h,
-                    source_textures: canvas.resources.textures.clone(),
-                    last_presented_idx: canvas.resources.last_presented_idx.clone(),
-                })
-            })
-            .collect();
-        layers.sort_by_key(|layer| layer.z_order);
-
-        scenes.push(CompositeSceneSnapshot {
-            monitor_id: *monitor_id,
-            scene_id: scene.monitor_id,
-            logical_w: scene.metrics.logical_w,
-            logical_h: scene.metrics.logical_h,
-            target,
-            layers,
-        });
-    }
-
-    scenes
-}
-
 /// Mirror of the original inline `FILL_RECT` → `UpdateSubresource` path
 /// (design.md §Preservation 3.6: World-only pixel output byte-for-byte
 /// unchanged). Hoisted to a helper so the dispatcher loop can call the same
@@ -397,6 +341,7 @@ fn snapshot_composite_scene_targets(
 /// preservation regression.
 fn fill_rect_on_target(
     ctx: &ID3D11DeviceContext,
+    rtv: &ID3D11RenderTargetView,
     texture: &ID3D11Texture2D,
     rw: u32,
     rh: u32,
@@ -413,20 +358,36 @@ fn fill_rect_on_target(
     if x1 <= x0 || y1 <= y0 {
         return;
     }
+
+    if let Ok(ctx1) = ctx.cast::<ID3D11DeviceContext1>() {
+        let rect = RECT {
+            left: x0 as i32,
+            top: y0 as i32,
+            right: x1 as i32,
+            bottom: y1 as i32,
+        };
+        let color = [
+            rgba[0].clamp(0.0, 1.0),
+            rgba[1].clamp(0.0, 1.0),
+            rgba[2].clamp(0.0, 1.0),
+            rgba[3].clamp(0.0, 1.0),
+        ];
+        if let Ok(view) = rtv.cast::<ID3D11View>() {
+            unsafe {
+                ctx1.ClearView(&view, &color, Some(&[rect]));
+            }
+            return;
+        }
+    }
+
     let bw = x1 - x0;
     let bh = y1 - y0;
     let b = (rgba[2].clamp(0.0, 1.0) * 255.0) as u8;
     let g = (rgba[1].clamp(0.0, 1.0) * 255.0) as u8;
     let r = (rgba[0].clamp(0.0, 1.0) * 255.0) as u8;
     let a = (rgba[3].clamp(0.0, 1.0) * 255.0) as u8;
-
-    // PERF: Instead of allocating a new Vec and zeroing it per draw call,
-    // we allocate once with capacity and push the bytes.
     let total_bytes = (bw * bh * 4) as usize;
     let mut pixels = Vec::with_capacity(total_bytes);
-
-    // Fast path: if the buffer is small enough or we are pushing uniform bytes,
-    // we can avoid extending and mutating.
     let pixel = [b, g, r, a];
     for _ in 0..(bw * bh) {
         pixels.extend_from_slice(&pixel);
@@ -454,14 +415,18 @@ fn fill_rect_on_target(
     }
 }
 
-fn draw_command_on_target(
+fn draw_commands_on_target(
     d2d: &D2DEngine,
     texture: &ID3D11Texture2D,
     rw: u32,
     rh: u32,
-    cmd: &DrawCmd,
+    cmds: &[DrawCmd],
 ) {
-    let Ok(bitmap) = d2d.create_target_bitmap(texture) else {
+    if cmds.is_empty() {
+        return;
+    }
+
+    let Ok(bitmap) = d2d.get_target_bitmap(texture) else {
         return;
     };
     unsafe {
@@ -477,32 +442,107 @@ fn draw_command_on_target(
                 M32: 0.0,
             });
     }
-    let mut painter = crate::renderer::painter::Painter::new(d2d, (rw, rh));
-    painter.execute(cmd);
+    {
+        let mut painter = crate::renderer::painter::Painter::new(d2d, (rw, rh));
+        for cmd in cmds {
+            painter.execute(cmd);
+        }
+    }
     unsafe {
         let _ = d2d.dc.EndDraw(None, None);
         d2d.dc.SetTarget(None);
     }
 }
 
-fn draw_command_for_space(
-    d2d: &D2DEngine,
-    world_target: Option<&RenderTargetSnapshot>,
-    local_targets: &HashMap<u32, RenderTargetSnapshot>,
-    stack: &[SpaceId],
-    cmd: &DrawCmd,
-) {
-    match stack.last() {
-        Some(SpaceId::MonitorLocal) => {
-            for target in local_targets.values() {
-                draw_command_on_target(d2d, &target.texture, target.render_w, target.render_h, cmd);
+#[derive(Default)]
+struct PendingD2DCommands {
+    world: Vec<DrawCmd>,
+    locals: HashMap<u32, Vec<DrawCmd>>,
+}
+
+impl PendingD2DCommands {
+    fn push_for_space(
+        &mut self,
+        local_targets: &HashMap<u32, RenderTargetSnapshot>,
+        stack: &[SpaceId],
+        cmd: DrawCmd,
+    ) {
+        match stack.last() {
+            Some(SpaceId::MonitorLocal) => {
+                for monitor_id in local_targets.keys() {
+                    self.locals
+                        .entry(*monitor_id)
+                        .or_default()
+                        .push(cmd.clone());
+                }
             }
+            _ => self.world.push(cmd),
         }
-        _ => {
-            if let Some(target) = world_target {
-                draw_command_on_target(d2d, &target.texture, target.render_w, target.render_h, cmd);
+    }
+
+    fn flush_world(&mut self, d2d: &D2DEngine, world_target: Option<&RenderTargetSnapshot>) {
+        if self.world.is_empty() {
+            return;
+        }
+        if let Some(target) = world_target {
+            draw_commands_on_target(
+                d2d,
+                &target.texture,
+                target.render_w,
+                target.render_h,
+                &self.world,
+            );
+        }
+        self.world.clear();
+    }
+
+    fn flush_locals(
+        &mut self,
+        d2d: &D2DEngine,
+        local_targets: &HashMap<u32, RenderTargetSnapshot>,
+    ) {
+        if self.locals.is_empty() {
+            return;
+        }
+        for (monitor_id, cmds) in self.locals.iter_mut() {
+            if cmds.is_empty() {
+                continue;
             }
+            if let Some(target) = local_targets.get(monitor_id) {
+                draw_commands_on_target(
+                    d2d,
+                    &target.texture,
+                    target.render_w,
+                    target.render_h,
+                    cmds,
+                );
+            }
+            cmds.clear();
         }
+        self.locals.retain(|_, cmds| !cmds.is_empty());
+    }
+
+    fn flush_for_space(
+        &mut self,
+        d2d: &D2DEngine,
+        world_target: Option<&RenderTargetSnapshot>,
+        local_targets: &HashMap<u32, RenderTargetSnapshot>,
+        stack: &[SpaceId],
+    ) {
+        match stack.last() {
+            Some(SpaceId::MonitorLocal) => self.flush_locals(d2d, local_targets),
+            _ => self.flush_world(d2d, world_target),
+        }
+    }
+
+    fn flush_all(
+        &mut self,
+        d2d: &D2DEngine,
+        world_target: Option<&RenderTargetSnapshot>,
+        local_targets: &HashMap<u32, RenderTargetSnapshot>,
+    ) {
+        self.flush_world(d2d, world_target);
+        self.flush_locals(d2d, local_targets);
     }
 }
 
@@ -519,102 +559,6 @@ fn draw_bitmap_command(draw: &BitmapDrawCommand, bitmap: u32) -> DrawCmd {
         dst_h: draw.dst_h,
         opacity: draw.opacity,
         interp_mode: draw.interp_mode,
-    }
-}
-
-fn render_composite_scenes(
-    d2d: &D2DEngine,
-    scenes: &[CompositeSceneSnapshot],
-    canvas_id: u32,
-    frame_id: u64,
-) {
-    for scene in scenes {
-        let Ok(target_bitmap) = d2d.create_target_bitmap(&scene.target.texture) else {
-            eprintln!(
-                "SubmitFrame: canvas={} frame={} monitor={} composite — create target bitmap failed",
-                canvas_id, frame_id, scene.monitor_id
-            );
-            continue;
-        };
-
-        unsafe {
-            d2d.dc.SetTarget(&target_bitmap);
-            d2d.dc.BeginDraw();
-            d2d.dc.Clear(Some(&D2D1_COLOR_F {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            }));
-            d2d.dc
-                .SetTransform(&windows::Foundation::Numerics::Matrix3x2 {
-                    M11: scene.target.render_w as f32 / scene.logical_w.max(1) as f32,
-                    M12: 0.0,
-                    M21: 0.0,
-                    M22: scene.target.render_h as f32 / scene.logical_h.max(1) as f32,
-                    M31: 0.0,
-                    M32: 0.0,
-                });
-        }
-
-        for layer in &scene.layers {
-            if layer.logical_w == 0 || layer.logical_h == 0 {
-                continue;
-            }
-            let idx = layer.last_presented_idx.load(Ordering::Relaxed);
-            let Some(source_texture) = layer.source_textures.get(idx) else {
-                continue;
-            };
-            let Ok(source_bitmap) = d2d.create_source_bitmap(source_texture) else {
-                eprintln!(
-                    "SubmitFrame: canvas={} frame={} monitor={} scene={} layer canvas={} composite — create source bitmap failed",
-                    canvas_id, frame_id, scene.monitor_id, scene.scene_id, layer.canvas_id
-                );
-                continue;
-            };
-            let dst_rect = D2D_RECT_F {
-                left: layer.x as f32,
-                top: layer.y as f32,
-                right: layer.x as f32 + layer.logical_w as f32,
-                bottom: layer.y as f32 + layer.logical_h as f32,
-            };
-            unsafe {
-                d2d.dc.DrawBitmap(
-                    &source_bitmap,
-                    Some(&dst_rect),
-                    1.0,
-                    D2D1_INTERPOLATION_MODE_LINEAR,
-                    None,
-                    None,
-                );
-            }
-        }
-
-        unsafe {
-            let _ = d2d.dc.EndDraw(None, None);
-            d2d.dc.SetTarget(None);
-            match scene.target.surface.SetBuffer(&scene.target.buffer) {
-                Err(e) => {
-                    eprintln!(
-                        "SubmitFrame: canvas={} frame={} monitor={} composite SetBuffer error: {}",
-                        canvas_id, frame_id, scene.monitor_id, e
-                    );
-                }
-                Ok(()) => {
-                    match present_manager(&scene.target.manager, "CompositeOutputResources") {
-                        PresentOutcome::Success => {}
-                        PresentOutcome::RetryNextTick => {}
-                        PresentOutcome::DeviceLost => {
-                            eprintln!(
-                            "SubmitFrame: canvas={} frame={} monitor={} composite device-lost — output rebuild required (not yet implemented)",
-                            canvas_id, frame_id, scene.monitor_id
-                        );
-                        }
-                    }
-                }
-            }
-            while scene.target.manager.GetNextPresentStatistics().is_ok() {}
-        }
     }
 }
 
@@ -746,7 +690,10 @@ fn send_close_monitor(tx: &tokio::sync::mpsc::UnboundedSender<ControlMessage>, m
     let _ = tx.send(ControlMessage::CloseMonitor { monitor_id });
 }
 
-async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
+async fn handle_client(
+    pipe: NamedPipeServer,
+    compositor: Arc<crate::compositor::CompositorScheduler>,
+) -> anyhow::Result<()> {
     let (mut rh, mut wh) = tokio::io::split(pipe);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ControlMessage>();
 
@@ -841,8 +788,13 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                     println!("Registered {:?} Monitor with ID: {} (PID: {})", kind, id, pid);
                     if should_close {
                         send_close_monitor(&tx, id);
-                    } else if request_id != 0 && owner_app_id != 0 {
-                        complete_pending_monitor_start(request_id, owner_app_id, id);
+                    } else {
+                        if request_id != 0 && owner_app_id != 0 {
+                            complete_pending_monitor_start(request_id, owner_app_id, id);
+                        }
+                        if target_canvas_id != 0 {
+                            compositor.mark_monitor_dirty(id);
+                        }
                     }
                 }
                 ControlMessage::CreateCanvas {
@@ -880,6 +832,7 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                             eprintln!("AttachMonitor error: {}", e);
                         } else {
                             println!("Attached Canvas {} to Monitor {}", canvas_id, monitor_id);
+                            compositor.mark_monitor_dirty(monitor_id);
                         }
                     } else {
                         eprintln!(
@@ -952,6 +905,11 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                                 let mut state = crate::ipc::server::SERVER_STATE.write();
                                 state.attach_game_bar_monitor_for_app(app_id, target_canvas_id, count)
                             };
+                            if status == MonitorRequestStatus::Ok {
+                                for monitor_id in &monitor_ids {
+                                    compositor.mark_monitor_dirty(*monitor_id);
+                                }
+                            }
                             send_start_monitor_result(&tx, request_id, status, monitor_ids);
                         }
                         MonitorKind::DesktopWindow => {
@@ -1183,6 +1141,12 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                                     |resolved_canvas_id| {
                                         let app = state.apps.get(&app_id)?;
                                         let canvas = state.canvases.get(&resolved_canvas_id)?;
+                                        let present_world_to_surface = canvas
+                                            .attached_monitor_ids
+                                            .iter()
+                                            .any(|monitor_id| {
+                                                !state.monitor_scene_outputs.contains_key(monitor_id)
+                                            });
                                         Some((
                                             resolved_canvas_id,
                                             snapshot_submit_frame_targets(
@@ -1190,11 +1154,7 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                                                 resolved_canvas_id,
                                                 frame_id,
                                                 &usage,
-                                            ),
-                                            snapshot_composite_scene_targets(
-                                                &state,
-                                                resolved_canvas_id,
-                                                frame_id,
+                                                present_world_to_surface,
                                             ),
                                             state.devices.clone(),
                                             app.bitmap_handles.clone(),
@@ -1203,18 +1163,10 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                                 )
                             };
 
-                            if let Some((
-                                resolved_canvas_id,
-                                targets,
-                                composite_scenes,
-                                devices,
-                                bitmap_handles,
-                            )) = snapshot
-                            {
+                            if let Some((resolved_canvas_id, targets, devices, bitmap_handles)) = snapshot {
                                 let guard = devices.render_ctx.lock().unwrap();
-                                dispatch_submit_frame(
+                                let result = dispatch_submit_frame(
                                     targets,
-                                    composite_scenes,
                                     &guard.d3d_ctx,
                                     &guard.d2d,
                                     resolved_canvas_id,
@@ -1224,6 +1176,10 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
                                     &mut render_durations,
                                     frame_start,
                                 );
+                                drop(guard);
+                                if result.world_presented {
+                                    compositor.mark_canvas_presented(resolved_canvas_id);
+                                }
                             }
                         }
                     }
@@ -1242,21 +1198,37 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
 
     // Cleanup on disconnect
     if let Some((id, is_app)) = client_id {
-        let mut state = crate::ipc::server::SERVER_STATE.write();
-        if is_app {
-            println!("Cleaning up App {}", id);
-            cancel_pending_monitor_starts_for_app(id);
-            for (monitor_id, monitor_tx) in state.close_owned_desktop_monitors(id) {
-                send_close_monitor(&monitor_tx, monitor_id);
+        let dirty_monitor_ids = {
+            let mut state = crate::ipc::server::SERVER_STATE.write();
+            if is_app {
+                println!("Cleaning up App {}", id);
+                cancel_pending_monitor_starts_for_app(id);
+                for (monitor_id, monitor_tx) in state.close_owned_desktop_monitors(id) {
+                    send_close_monitor(&monitor_tx, monitor_id);
+                }
+
+                let affected_monitor_ids: Vec<u32> = state
+                    .monitor_scenes
+                    .iter()
+                    .filter_map(|(monitor_id, scene)| scene.contains_app(id).then_some(*monitor_id))
+                    .collect();
+
+                // Task 6.2: Broadcast AppDetached before remove_app
+                broadcast_app_detached(&state, id, detach_reason);
+
+                state.remove_app(id);
+                affected_monitor_ids
+                    .into_iter()
+                    .filter(|monitor_id| state.monitor_scenes.contains_key(monitor_id))
+                    .collect()
+            } else {
+                println!("Cleaning up Monitor {}", id);
+                state.remove_monitor(id);
+                Vec::new()
             }
-
-            // Task 6.2: Broadcast AppDetached before remove_app
-            broadcast_app_detached(&state, id, detach_reason);
-
-            state.remove_app(id);
-        } else {
-            println!("Cleaning up Monitor {}", id);
-            state.remove_monitor(id);
+        };
+        for monitor_id in dirty_monitor_ids {
+            compositor.mark_monitor_dirty(monitor_id);
         }
     }
 
@@ -1289,9 +1261,12 @@ async fn handle_client(pipe: NamedPipeServer) -> anyhow::Result<()> {
 /// is `false`, no per-Monitor acquires happen, and the World render path
 /// is byte-for-byte the pre-task-3.4 path — which is exactly what PBT B
 /// (preservation.rs) pins.
+struct SubmitFrameResult {
+    world_presented: bool,
+}
+
 fn dispatch_submit_frame(
     targets: SubmitFrameTargets,
-    composite_scenes: Vec<CompositeSceneSnapshot>,
     ctx: &ID3D11DeviceContext,
     d2d: &D2DEngine,
     canvas_id: u32,
@@ -1300,7 +1275,7 @@ fn dispatch_submit_frame(
     bitmap_handles: &HashMap<u32, u32>,
     render_durations: &mut VecDeque<Duration>,
     frame_start: Instant,
-) {
+) -> SubmitFrameResult {
     let world_target = targets.world.as_ref();
     let local_targets = &targets.locals;
 
@@ -1313,6 +1288,7 @@ fn dispatch_submit_frame(
     // never drawn them — PBT B hashes this exact behavior).
     // ---------------------------------------------------------------
     let mut stack: Vec<SpaceId> = Vec::new();
+    let mut pending_d2d = PendingD2DCommands::default();
     for cmd in cmds {
         match cmd {
             RenderCommand::PushSpace(s) => stack.push(*s),
@@ -1325,65 +1301,77 @@ fn dispatch_submit_frame(
                     );
                 }
             }
-            RenderCommand::Clear(c) => match stack.last() {
-                Some(SpaceId::MonitorLocal) => {
-                    for target in local_targets.values() {
-                        unsafe {
-                            ctx.ClearRenderTargetView(&target.rtv, c);
+            RenderCommand::Clear(c) => {
+                pending_d2d.flush_for_space(d2d, world_target, local_targets, &stack);
+                match stack.last() {
+                    Some(SpaceId::MonitorLocal) => {
+                        for target in local_targets.values() {
+                            unsafe {
+                                ctx.ClearRenderTargetView(&target.rtv, c);
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(target) = world_target {
+                            unsafe {
+                                ctx.ClearRenderTargetView(&target.rtv, c);
+                            }
                         }
                     }
                 }
-                _ => {
-                    if let Some(target) = world_target {
-                        unsafe {
-                            ctx.ClearRenderTargetView(&target.rtv, c);
+            }
+            RenderCommand::Draw(DrawCmd::FillRect { x, y, w, h, rgba }) => {
+                pending_d2d.flush_for_space(d2d, world_target, local_targets, &stack);
+                match stack.last() {
+                    Some(SpaceId::MonitorLocal) => {
+                        for target in local_targets.values() {
+                            fill_rect_on_target(
+                                ctx,
+                                &target.rtv,
+                                &target.texture,
+                                target.render_w,
+                                target.render_h,
+                                *x,
+                                *y,
+                                *w,
+                                *h,
+                                *rgba,
+                            );
+                        }
+                    }
+                    _ => {
+                        if let Some(target) = world_target {
+                            fill_rect_on_target(
+                                ctx,
+                                &target.rtv,
+                                &target.texture,
+                                target.render_w,
+                                target.render_h,
+                                *x,
+                                *y,
+                                *w,
+                                *h,
+                                *rgba,
+                            );
                         }
                     }
                 }
-            },
-            RenderCommand::Draw(DrawCmd::FillRect { x, y, w, h, rgba }) => match stack.last() {
-                Some(SpaceId::MonitorLocal) => {
-                    for target in local_targets.values() {
-                        fill_rect_on_target(
-                            ctx,
-                            &target.texture,
-                            target.render_w,
-                            target.render_h,
-                            *x,
-                            *y,
-                            *w,
-                            *h,
-                            *rgba,
-                        );
-                    }
-                }
-                _ => {
-                    if let Some(target) = world_target {
-                        fill_rect_on_target(
-                            ctx,
-                            &target.texture,
-                            target.render_w,
-                            target.render_h,
-                            *x,
-                            *y,
-                            *w,
-                            *h,
-                            *rgba,
-                        );
-                    }
-                }
-            },
+            }
             RenderCommand::Draw(cmd) => {
-                draw_command_for_space(d2d, world_target, local_targets, &stack, cmd);
+                pending_d2d.push_for_space(local_targets, &stack, cmd.clone());
             }
             RenderCommand::DrawBitmap(draw) => {
                 if let Some(bitmap) = bitmap_handles.get(&draw.bitmap_id) {
-                    let cmd = draw_bitmap_command(draw, *bitmap);
-                    draw_command_for_space(d2d, world_target, local_targets, &stack, &cmd);
+                    pending_d2d.push_for_space(
+                        local_targets,
+                        &stack,
+                        draw_bitmap_command(draw, *bitmap),
+                    );
                 }
             }
         }
     }
+    pending_d2d.flush_all(d2d, world_target, local_targets);
     if !stack.is_empty() {
         use std::sync::atomic::{AtomicBool, Ordering};
         static WARNED: AtomicBool = AtomicBool::new(false);
@@ -1407,72 +1395,99 @@ fn dispatch_submit_frame(
     // Present each target INDEPENDENTLY. A per-Monitor failure MUST
     // NOT affect World or other Monitors (Preservation 3.4).
     // ---------------------------------------------------------------
+    let mut world_presented = false;
     if let Some(target) = world_target {
-        unsafe {
-            match target.surface.SetBuffer(&target.buffer) {
-                Err(e) => {
-                    eprintln!(
-                        "SubmitFrame: canvas={} frame={} World SetBuffer error: {}",
-                        canvas_id, frame_id, e
-                    );
-                }
-                Ok(()) => match present_manager(&target.manager, "CanvasResources") {
-                    PresentOutcome::Success => {
-                        if let Some(last_presented_idx) = &target.last_presented_idx {
-                            last_presented_idx.store(target.buffer_idx, Ordering::Relaxed);
-                        }
-                    }
-                    PresentOutcome::RetryNextTick => {}
-                    PresentOutcome::DeviceLost => {
+        match &target.present {
+            RenderTargetPresent::Presentation {
+                buffer,
+                surface,
+                manager,
+            } => unsafe {
+                match surface.SetBuffer(buffer) {
+                    Err(e) => {
                         eprintln!(
-                            "SubmitFrame: canvas={} frame={} World device-lost \
-                             — Canvas rebuild required (not yet implemented)",
-                            canvas_id, frame_id
+                            "SubmitFrame: canvas={} frame={} World SetBuffer error: {}",
+                            canvas_id, frame_id, e
                         );
                     }
-                },
+                    Ok(()) => match present_manager(manager, "CanvasResources") {
+                        PresentOutcome::Success => {
+                            if let Some(last_presented_idx) = &target.last_presented_idx {
+                                last_presented_idx.store(target.buffer_idx, Ordering::Relaxed);
+                            }
+                            world_presented = true;
+                        }
+                        PresentOutcome::RetryNextTick => {}
+                        PresentOutcome::DeviceLost => {
+                            eprintln!(
+                                "SubmitFrame: canvas={} frame={} World device-lost \
+                                 — Canvas rebuild required (not yet implemented)",
+                                canvas_id, frame_id
+                            );
+                        }
+                    },
+                }
+            },
+            RenderTargetPresent::TextureOnly => {
+                if let Some(last_presented_idx) = &target.last_presented_idx {
+                    last_presented_idx.store(target.buffer_idx, Ordering::Relaxed);
+                }
+                world_presented = true;
             }
         }
     }
 
     for (monitor_id, target) in local_targets {
-        unsafe {
-            match target.surface.SetBuffer(&target.buffer) {
-                Err(e) => {
-                    eprintln!(
-                        "SubmitFrame: canvas={} frame={} monitor={} \
-                         MonitorLocal SetBuffer error: {} — skipping this \
-                         monitor only",
-                        canvas_id, frame_id, monitor_id, e
-                    );
-                    continue;
-                }
-                Ok(()) => match present_manager(&target.manager, "PerMonitorResources") {
-                    PresentOutcome::Success => {}
-                    PresentOutcome::RetryNextTick => {}
-                    PresentOutcome::DeviceLost => {
+        match &target.present {
+            RenderTargetPresent::Presentation {
+                buffer,
+                surface,
+                manager,
+            } => unsafe {
+                match surface.SetBuffer(buffer) {
+                    Err(e) => {
                         eprintln!(
                             "SubmitFrame: canvas={} frame={} monitor={} \
-                             MonitorLocal device-lost — per-Monitor \
-                             rebuild required (not yet implemented)",
-                            canvas_id, frame_id, monitor_id
+                             MonitorLocal SetBuffer error: {} — skipping this \
+                             monitor only",
+                            canvas_id, frame_id, monitor_id, e
                         );
+                        continue;
                     }
-                },
+                    Ok(()) => match present_manager(manager, "PerMonitorResources") {
+                        PresentOutcome::Success => {}
+                        PresentOutcome::RetryNextTick => {}
+                        PresentOutcome::DeviceLost => {
+                            eprintln!(
+                                "SubmitFrame: canvas={} frame={} monitor={} \
+                                 MonitorLocal device-lost — per-Monitor \
+                                 rebuild required (not yet implemented)",
+                                canvas_id, frame_id, monitor_id
+                            );
+                        }
+                    },
+                }
+            },
+            RenderTargetPresent::TextureOnly => {
+                if let Some(last_presented_idx) = &target.last_presented_idx {
+                    last_presented_idx.store(target.buffer_idx, Ordering::Relaxed);
+                }
             }
         }
     }
-
-    render_composite_scenes(d2d, &composite_scenes, canvas_id, frame_id);
 
     // Drain present statistics once at the end of the frame without blocking.
     // The APCs will arrive while we wait in `acquire_available_buffer`.
     unsafe {
         if let Some(target) = world_target {
-            while target.manager.GetNextPresentStatistics().is_ok() {}
+            if let RenderTargetPresent::Presentation { manager, .. } = &target.present {
+                while manager.GetNextPresentStatistics().is_ok() {}
+            }
         }
         for target in local_targets.values() {
-            while target.manager.GetNextPresentStatistics().is_ok() {}
+            if let RenderTargetPresent::Presentation { manager, .. } = &target.present {
+                while manager.GetNextPresentStatistics().is_ok() {}
+            }
         }
     }
 
@@ -1489,6 +1504,8 @@ fn dispatch_submit_frame(
             avg.as_secs_f64() * 1000.0
         );
     }
+
+    SubmitFrameResult { world_presented }
 }
 
 #[cfg(test)]

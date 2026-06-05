@@ -474,6 +474,23 @@ impl CanvasResources {
         acquire_available_buffer(&self.manager, &self.available_events, timeout_ms)
     }
 
+    /// Pick the next Canvas texture slot for Core-composited output.
+    ///
+    /// When a Canvas is consumed only by Core's MonitorScene compositor, the
+    /// Canvas surface itself is not mounted by DWM. In that path we do not need
+    /// to wait for the Canvas PresentationManager; we only need a stable texture
+    /// slot that is different from the last slot published to the compositor.
+    pub fn next_compositor_write_idx(&self) -> usize {
+        let last = self
+            .last_presented_idx
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if last == usize::MAX {
+            0
+        } else {
+            (last + 1) % BUFFER_COUNT
+        }
+    }
+
     /// Call `IPresentationManager::Present` and classify the result.
     ///
     /// design.md §Fix Implementation → Change 3 requires three classes:

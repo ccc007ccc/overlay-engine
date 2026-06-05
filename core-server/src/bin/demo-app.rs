@@ -6,7 +6,6 @@ use core_server::ipc::protocol::{
 };
 use core_server::server_task::PIPE_NAME;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -42,6 +41,8 @@ struct DemoOptions {
     smoke_index: u32,
     window_mode: DesktopWindowMode,
     click_through: bool,
+    throughput: bool,
+    benchmark_seconds: Option<u64>,
 }
 
 impl Default for DemoOptions {
@@ -53,6 +54,8 @@ impl Default for DemoOptions {
             smoke_index: 0,
             window_mode: DesktopWindowMode::Bordered,
             click_through: false,
+            throughput: false,
+            benchmark_seconds: None,
         }
     }
 }
@@ -83,6 +86,13 @@ fn parse_demo_options() -> anyhow::Result<Option<DemoOptions>> {
                 options.window_mode = parse_window_mode(&value)?;
             }
             "--click-through" => options.click_through = true,
+            "--throughput" | "--no-vsync-metric" => options.throughput = true,
+            "--benchmark-seconds" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--benchmark-seconds requires a value"))?;
+                options.benchmark_seconds = Some(value.parse()?);
+            }
             "-h" | "--help" => {
                 print_usage();
                 return Ok(None);
@@ -111,8 +121,9 @@ fn window_mode_label(mode: DesktopWindowMode) -> &'static str {
 }
 
 fn print_usage() {
-    println!("Usage: demo-app [--unlocked] [--desktop-monitors N] [--game-bar] [--smoke-index N] [--window-mode bordered|borderless|fullscreen] [--click-through]");
+    println!("Usage: demo-app [--unlocked] [--desktop-monitors N] [--game-bar] [--smoke-index N] [--window-mode bordered|borderless|fullscreen] [--click-through] [--throughput] [--benchmark-seconds N]");
     println!("Default: --desktop-monitors 3 --window-mode bordered");
+    println!("--throughput: 关闭 DwmFlush 等待，用 app 提交吞吐量统计，不代表实际上屏 FPS");
 }
 
 async fn send_control_message<W: AsyncWrite + Unpin>(
@@ -691,6 +702,21 @@ fn write_complex_animation_scene(buf: &mut [u8], pos: &mut usize, cw: f32, ch: f
     );
 }
 
+fn game_bar_smoke_color(smoke_index: u32) -> (f32, f32, f32) {
+    const COLORS: [(f32, f32, f32); 9] = [
+        (1.0, 0.0, 0.85),
+        (0.0, 0.95, 1.0),
+        (1.0, 0.95, 0.0),
+        (0.25, 1.0, 0.15),
+        (1.0, 0.45, 0.0),
+        (0.65, 0.25, 1.0),
+        (1.0, 0.15, 0.25),
+        (0.15, 0.45, 1.0),
+        (0.1, 1.0, 0.55),
+    ];
+    COLORS[(smoke_index.saturating_sub(2) as usize) % COLORS.len()]
+}
+
 fn write_game_bar_smoke_scene(
     buf: &mut [u8],
     pos: &mut usize,
@@ -759,40 +785,33 @@ fn write_game_bar_smoke_scene(
         return;
     }
 
+    let layer = smoke_index.saturating_sub(2) as f32;
+    let (r, g, b) = game_bar_smoke_color(smoke_index);
+    let tile_w = (cw / 5.0).max(220.0);
+    let tile_h = (ch / 2.0).max(180.0);
+    let col = (smoke_index.saturating_sub(2) % 5) as f32;
+    let row = ((smoke_index.saturating_sub(2) / 5) % 2) as f32;
+    let base_x = col * tile_w + 24.0;
+    let base_y = row * tile_h + 24.0;
+    let w = (tile_w - 48.0).max(140.0);
+    let h = (tile_h - 48.0).max(120.0);
+    let phase = t * (0.8 + layer * 0.07) + layer * 0.61;
+    let dx = phase.sin() * (w * 0.16).min(42.0);
+    let dy = phase.cos() * (h * 0.16).min(34.0);
+    let x = (base_x + dx).clamp(12.0, (cw - w - 12.0).max(12.0));
+    let y = (base_y + dy).clamp(12.0, (ch - h - 12.0).max(12.0));
+
     write_cmd_clear(buf, pos, 0.0, 0.0, 0.0, 0.0);
-    write_cmd_fill_rect(
-        buf,
-        pos,
-        44.0,
-        44.0,
-        cw - 88.0,
-        ch - 88.0,
-        0.22,
-        0.0,
-        0.22,
-        0.22,
-    );
-    write_cmd_stroke_rect(
-        buf,
-        pos,
-        44.0,
-        44.0,
-        cw - 88.0,
-        ch - 88.0,
-        26.0,
-        1.0,
-        0.0,
-        1.0,
-        1.0,
-    );
-    write_cmd_fill_rect(buf, pos, 70.0, 70.0, cw - 140.0, 108.0, 1.0, 1.0, 0.0, 1.0);
+    write_cmd_fill_rect(buf, pos, x, y, w, h, r * 0.28, g * 0.28, b * 0.28, 0.28);
+    write_cmd_stroke_rect(buf, pos, x, y, w, h, 10.0, r, g, b, 1.0);
+    write_cmd_fill_rect(buf, pos, x + 14.0, y + 14.0, 96.0, 56.0, r, g, b, 1.0);
     write_cmd_draw_text(
         buf,
         pos,
-        "APP 2 OVERLAY",
-        96.0,
-        94.0,
-        58.0,
+        &format!("APP {smoke_index}"),
+        x + 24.0,
+        y + 24.0,
+        34.0,
         0.0,
         0.0,
         0.0,
@@ -801,34 +820,40 @@ fn write_game_bar_smoke_scene(
     write_cmd_draw_text(
         buf,
         pos,
-        "22% transparent magenta + moving cyan box",
-        96.0,
-        184.0,
-        38.0,
+        &format!("layer {smoke_index} / 10"),
+        x + 20.0,
+        y + 86.0,
+        24.0,
         1.0,
         1.0,
         1.0,
         1.0,
     );
-    let line_y = (230.0 + (t * 1.3).sin() * 90.0).clamp(220.0, (ch - 120.0).max(220.0));
+    write_cmd_fill_ellipse(
+        buf,
+        pos,
+        x + w - 46.0,
+        y + 44.0,
+        26.0 + phase.sin().abs() * 10.0,
+        26.0 + phase.cos().abs() * 10.0,
+        r,
+        g,
+        b,
+        0.85,
+    );
     write_cmd_draw_line(
         buf,
         pos,
-        70.0,
-        ch - 80.0,
-        cw - 70.0,
-        line_y,
-        10.0,
-        0.0,
-        1.0,
-        1.0,
+        x + 20.0,
+        y + h - 34.0,
+        x + w - 20.0,
+        y + h - 34.0 + phase.sin() * 24.0,
+        8.0,
+        r,
+        g,
+        b,
         1.0,
     );
-    let x = ((cw * 0.55 - 60.0) + (t * 1.55).sin() * (cw * 0.30).min(260.0))
-        .clamp(70.0, (cw - 190.0).max(70.0));
-    let y = (ch * 0.62 - 45.0 + (t * 1.05).cos() * (ch * 0.12).min(90.0))
-        .clamp(230.0, (ch - 180.0).max(230.0));
-    write_cmd_fill_rect(buf, pos, x, y, 120.0, 90.0, 0.0, 1.0, 0.75, 1.0);
 }
 
 #[tokio::main]
@@ -840,20 +865,17 @@ async fn main() -> anyhow::Result<()> {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as u32;
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1) as u32;
-    let (canvas_w, canvas_h) = if options.game_bar && options.smoke_index > 1 {
-        (
-            (screen_w.saturating_mul(2) / 5).max(320).min(screen_w),
-            (screen_h.saturating_mul(2) / 5).max(240).min(screen_h),
-        )
-    } else {
-        (screen_w, screen_h)
-    };
+    let (canvas_w, canvas_h) = (screen_w, screen_h);
     println!("[demo-app] 屏幕分辨率: {}x{}", screen_w, screen_h);
-    if options.unlocked {
+    if options.throughput {
+        println!("[demo-app] 模式: 提交吞吐量测试（不等待实际上屏 VSync）");
+    } else if options.unlocked {
         println!("[demo-app] 模式: 无帧数限制 (Unlocked)");
     } else {
-        println!("[demo-app] 模式: DWM VSync (锁定帧率)");
+        println!("[demo-app] 模式: 120Hz 提交 pacing（不调用 DwmFlush）");
     }
+    let _timer_resolution = (!options.throughput && !options.unlocked)
+        .then(|| core_server::timer_resolution::HighResolutionTimerGuard::request_1ms("demo-app"));
     if options.game_bar {
         println!(
             "[demo-app] Game Bar smoke: enabled, app index={}",
@@ -1020,7 +1042,7 @@ async fn main() -> anyhow::Result<()> {
     println!("[demo-app] 已打开共享内存: {}", shmem_name);
 
     // 持续渲染循环
-    println!("[demo-app] 开始渲染循环（DWM vsync，Ctrl+C 退出）...");
+    println!("[demo-app] 开始渲染循环（Ctrl+C 退出）...");
     let mut frame_id: u64 = 0;
     let cw = canvas_w as f32;
     let ch = canvas_h as f32;
@@ -1029,6 +1051,11 @@ async fn main() -> anyhow::Result<()> {
     let mut fps_frame_count: u64 = 0;
     let mut current_fps: f32 = 0.0;
     let start_time = std::time::Instant::now();
+    let benchmark_deadline = options
+        .benchmark_seconds
+        .map(|seconds| start_time + std::time::Duration::from_secs(seconds));
+    let target_frame_interval = std::time::Duration::from_micros(8_333);
+    let mut next_frame_time = start_time;
 
     // Use a simple ring-buffer strategy for the offset to prevent data races
     // when running --unlocked.
@@ -1271,11 +1298,28 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?;
 
-        if options.game_bar && options.smoke_index > 0 && !options.unlocked {
-            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+        if let Some(deadline) = benchmark_deadline {
+            if std::time::Instant::now() >= deadline {
+                let total_seconds = start_time.elapsed().as_secs_f64().max(0.001);
+                println!(
+                    "[demo-app] throughput summary: frames={} seconds={:.3} fps={:.0}",
+                    frame_id,
+                    total_seconds,
+                    frame_id as f64 / total_seconds
+                );
+                return Ok(());
+            }
+        }
+
+        if options.throughput {
+            tokio::task::yield_now().await;
         } else if !options.unlocked {
-            if let Err(e) = unsafe { DwmFlush() } {
-                eprintln!("[demo-app] DwmFlush failed: {}", e);
+            next_frame_time += target_frame_interval;
+            let now = std::time::Instant::now();
+            if next_frame_time > now {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(next_frame_time)).await;
+            } else {
+                next_frame_time = now;
                 tokio::task::yield_now().await;
             }
         } else {

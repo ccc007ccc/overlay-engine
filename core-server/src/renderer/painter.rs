@@ -50,7 +50,7 @@
 #![allow(non_snake_case)]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::ManuallyDrop;
 
 use windows::core::{w, Interface};
@@ -94,6 +94,8 @@ type TextFormatKey = u32;
 type BrushKey = [u8; 4];
 /// v0.7 stroke style cache key = dash_style（0..=3）。端点形状 / line join 固定 FLAT / MITER。
 type StrokeStyleKey = u8;
+type SourceBitmapKey = usize;
+type TargetBitmapKey = usize;
 
 // ============================================================
 // v0.7 dash_style 常量（与 ABI / spec 第 2.3.1 节一致）
@@ -192,6 +194,12 @@ pub struct D2DEngine {
     /// v0.7：D2D StrokeStyle 缓存。Stroke style 与 factory 绑定不与 dc/RT 绑定，跨 resize 长存。
     /// 仅 4 种 dash 模式（实线/划/点/划点），命中率接近 100%。
     stroke_style_cache: RefCell<HashMap<StrokeStyleKey, ID2D1StrokeStyle>>,
+    /// Core compositor/source 绘制 bitmap 缓存。CanvasResources 的 texture slots 生命周期稳定，
+    /// composite tick 可复用同一批 ID2D1Bitmap1，避免每层每帧 CreateBitmapFromDxgiSurface。
+    source_bitmap_cache: RefCell<HashMap<SourceBitmapKey, ID2D1Bitmap1>>,
+    /// Target bitmap 缓存。SubmitFrame 和 compositor 都会反复把同一批 texture slot 设为 D2D target，
+    /// 缓存后每个 slot 只需包装一次。
+    target_bitmap_cache: RefCell<HashMap<TargetBitmapKey, ID2D1Bitmap1>>,
 
     /// v0.7 phase 2：WIC 解码器（PNG/JPG/...→ IWICBitmapSource）
     wic: WicDecoder,
@@ -251,6 +259,8 @@ impl D2DEngine {
             text_format_cache: RefCell::new(HashMap::with_capacity(8)),
             brush_cache: RefCell::new(HashMap::with_capacity(16)),
             stroke_style_cache: RefCell::new(HashMap::with_capacity(4)),
+            source_bitmap_cache: RefCell::new(HashMap::with_capacity(64)),
+            target_bitmap_cache: RefCell::new(HashMap::with_capacity(64)),
             wic,
             bitmaps: RefCell::new(ResourceTable::new()),
         })
@@ -282,6 +292,22 @@ impl D2DEngine {
         Ok(bitmap)
     }
 
+    pub(crate) fn get_target_bitmap(
+        &self,
+        texture: &ID3D11Texture2D,
+    ) -> RendererResult<ID2D1Bitmap1> {
+        let key = texture.as_raw() as usize;
+        if let Some(bitmap) = self.target_bitmap_cache.borrow().get(&key) {
+            return Ok(bitmap.clone());
+        }
+
+        let bitmap = self.create_target_bitmap(texture)?;
+        self.target_bitmap_cache
+            .borrow_mut()
+            .insert(key, bitmap.clone());
+        Ok(bitmap)
+    }
+
     /// 把 D3D11 texture 包装成可作为 D2D source 采样的 Bitmap1。
     ///
     /// Core compositor 用它把各 Canvas 最近一次提交的 World buffer
@@ -310,6 +336,28 @@ impl D2DEngine {
                 .CreateBitmapFromDxgiSurface(&dxgi_surface, Some(&props))
                 .map_err(RendererError::FrameAcquire)?
         };
+        Ok(bitmap)
+    }
+
+    pub(crate) fn prune_source_bitmap_cache(&self, live_keys: &HashSet<usize>) {
+        self.source_bitmap_cache
+            .borrow_mut()
+            .retain(|key, _| live_keys.contains(key));
+    }
+
+    pub(crate) fn get_source_bitmap(
+        &self,
+        texture: &ID3D11Texture2D,
+    ) -> RendererResult<ID2D1Bitmap1> {
+        let key = texture.as_raw() as usize;
+        if let Some(bitmap) = self.source_bitmap_cache.borrow().get(&key) {
+            return Ok(bitmap.clone());
+        }
+
+        let bitmap = self.create_source_bitmap(texture)?;
+        self.source_bitmap_cache
+            .borrow_mut()
+            .insert(key, bitmap.clone());
         Ok(bitmap)
     }
 
@@ -381,6 +429,8 @@ impl D2DEngine {
         self.text_format_cache.borrow_mut().clear();
         self.brush_cache.borrow_mut().clear();
         self.stroke_style_cache.borrow_mut().clear();
+        self.source_bitmap_cache.borrow_mut().clear();
+        self.target_bitmap_cache.borrow_mut().clear();
     }
 
     /// v0.7：按 dash_style 拿/造 ID2D1StrokeStyle。

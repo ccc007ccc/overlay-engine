@@ -488,7 +488,7 @@ fn build_attachment(
         render_h: attach.render_h,
         pending_close,
         click_through,
-        screen_space: attach.composite_scene_id.is_none(),
+        screen_space: true,
     };
     install_viewport_state(hwnd, state);
 
