@@ -64,13 +64,17 @@ struct ViewportState {
     render_h: u32,
     pending_close: Arc<AtomicBool>,
     click_through: bool,
+    screen_space: bool,
 }
 
 unsafe impl Send for ViewportState {}
 unsafe impl Sync for ViewportState {}
 
+#[derive(Debug, Clone, Copy)]
 struct CanvasAttach {
     canvas_id: u32,
+    monitor_id: Option<u32>,
+    composite_scene_id: Option<u32>,
     surface_handle: u64,
     logical_w: u32,
     logical_h: u32,
@@ -123,6 +127,7 @@ impl DesktopWindowOptions {
 
 struct WindowAttachment {
     _canvas_id: u32,
+    _composite_scene_id: Option<u32>,
     _target: IDCompositionTarget,
     _root_visual: IDCompositionVisual2,
     _world_visual: IDCompositionVisual2,
@@ -220,6 +225,25 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
 }
 
 fn update_viewport(hwnd: HWND, state: &ViewportState) {
+    if !state.screen_space {
+        let sx = state.logical_w as f32 / state.render_w.max(1) as f32;
+        let sy = state.logical_h as f32 / state.render_h.max(1) as f32;
+        let matrix = Matrix3x2 {
+            M11: sx,
+            M12: 0.0,
+            M21: 0.0,
+            M22: sy,
+            M31: 0.0,
+            M32: 0.0,
+        };
+        unsafe {
+            let _ = state.visual.SetContent(&state.surface);
+            let _ = state.visual.SetTransform2(&matrix);
+            let _ = state.dcomp_dev.Commit();
+        }
+        return;
+    }
+
     let mut rect = RECT::default();
     if unsafe { GetClientRect(hwnd, &mut rect) }.is_err() {
         return;
@@ -310,7 +334,7 @@ async fn register_and_wait_attach(
     msg.encode(&mut buf);
     pipe.write_all(&buf).await?;
     println!("[desktop-monitor] sent {:?}", msg);
-    println!("[desktop-monitor] waiting for CanvasAttached...");
+    println!("[desktop-monitor] waiting for CanvasAttached or MonitorCompositeAttached...");
 
     let attach = loop {
         match read_next_control_message(&mut pipe).await? {
@@ -324,6 +348,8 @@ async fn register_and_wait_attach(
             } if options.target_canvas_id == 0 || canvas_id == options.target_canvas_id => {
                 break CanvasAttach {
                     canvas_id,
+                    monitor_id: None,
+                    composite_scene_id: None,
                     surface_handle,
                     logical_w,
                     logical_h,
@@ -337,6 +363,26 @@ async fn register_and_wait_attach(
                     canvas_id, options.target_canvas_id
                 );
             }
+            ControlMessage::MonitorCompositeAttached {
+                monitor_id,
+                scene_id,
+                surface_handle,
+                logical_w,
+                logical_h,
+                render_w,
+                render_h,
+            } => {
+                break CanvasAttach {
+                    canvas_id: scene_id,
+                    monitor_id: Some(monitor_id),
+                    composite_scene_id: Some(scene_id),
+                    surface_handle,
+                    logical_w,
+                    logical_h,
+                    render_w,
+                    render_h,
+                };
+            }
             ControlMessage::CloseMonitor { monitor_id } => {
                 anyhow::bail!("Core closed monitor {} before CanvasAttached", monitor_id);
             }
@@ -349,22 +395,36 @@ async fn register_and_wait_attach(
         }
     };
 
-    println!(
-        "[desktop-monitor] CanvasAttached: id={} handle={:#x} log={}x{} ren={}x{}",
-        attach.canvas_id,
-        attach.surface_handle,
-        attach.logical_w,
-        attach.logical_h,
-        attach.render_w,
-        attach.render_h
-    );
-    set_window_title(
-        hwnd,
-        AttachState::Attached {
-            canvas_id: attach.canvas_id,
-            ml: false,
-        },
-    );
+    if let Some(scene_id) = attach.composite_scene_id {
+        println!(
+            "[desktop-monitor] MonitorCompositeAttached: monitor={:?} scene={} handle={:#x} log={}x{} ren={}x{}",
+            attach.monitor_id,
+            scene_id,
+            attach.surface_handle,
+            attach.logical_w,
+            attach.logical_h,
+            attach.render_w,
+            attach.render_h
+        );
+        set_window_title(hwnd, AttachState::Composite { scene_id });
+    } else {
+        println!(
+            "[desktop-monitor] CanvasAttached: id={} handle={:#x} log={}x{} ren={}x{}",
+            attach.canvas_id,
+            attach.surface_handle,
+            attach.logical_w,
+            attach.logical_h,
+            attach.render_w,
+            attach.render_h
+        );
+        set_window_title(
+            hwnd,
+            AttachState::Attached {
+                canvas_id: attach.canvas_id,
+                ml: false,
+            },
+        );
+    }
 
     Ok((pipe, attach))
 }
@@ -428,6 +488,7 @@ fn build_attachment(
         render_h: attach.render_h,
         pending_close,
         click_through,
+        screen_space: attach.composite_scene_id.is_none(),
     };
     install_viewport_state(hwnd, state);
 
@@ -439,6 +500,7 @@ fn build_attachment(
 
     Ok(WindowAttachment {
         _canvas_id: attach.canvas_id,
+        _composite_scene_id: attach.composite_scene_id,
         _target: target,
         _root_visual: root,
         _world_visual: visual,
@@ -493,6 +555,7 @@ async fn reconnect_with_backoff(
                 Ok((new_pipe, attach)) => {
                     let old_hwnd = window.hwnd;
                     window.hwnd = new_hwnd;
+                    window.core_monitor_id = attach.monitor_id;
 
                     window.attachment = Some(build_attachment(
                         new_hwnd,
@@ -683,6 +746,7 @@ async fn open_monitor_window(
     let pending_close = Arc::new(AtomicBool::new(false));
     let in_frame = Arc::new(AtomicBool::new(false));
     let (pipe, attach) = register_and_wait_attach(hwnd, options).await?;
+    let core_monitor_id = attach.monitor_id;
     let attachment =
         build_attachment(hwnd, attach, pending_close.clone(), options.click_through())?;
     unsafe {
@@ -694,7 +758,7 @@ async fn open_monitor_window(
         hwnd,
         options,
         owner_app_id: options.owner_app_id,
-        core_monitor_id: None,
+        core_monitor_id,
         pending_close,
         in_frame,
         attachment: Some(attachment),
@@ -1045,6 +1109,8 @@ async fn run_as_monitor_process(
                                 let in_frame = Arc::new(AtomicBool::new(false));
                                 let attach = CanvasAttach {
                                     canvas_id,
+                                    monitor_id: None,
+                                    composite_scene_id: None,
                                     surface_handle,
                                     logical_w,
                                     logical_h,
@@ -1076,6 +1142,62 @@ async fn run_as_monitor_process(
                             Err(e) => eprintln!("[desktop-monitor] re-create window failed: {e}"),
                         }
                     }
+                    PipeEvent::Message { window_id, msg: ControlMessage::MonitorCompositeAttached {
+                        monitor_id, scene_id, surface_handle, logical_w, logical_h, render_w, render_h,
+                    } } => {
+                        println!(
+                            "[desktop-monitor] MonitorCompositeAttached on window {}: monitor={} scene={}",
+                            window_id, monitor_id, scene_id
+                        );
+                        let options = windows
+                            .iter()
+                            .find(|w| w.id == window_id)
+                            .map(|w| w.options)
+                            .unwrap_or_default();
+
+                        if let Some(window) = windows.iter_mut().find(|w| w.id == window_id && !w.pending_close.load(Ordering::SeqCst)) {
+                            window.pending_close.store(true, Ordering::SeqCst);
+                        }
+
+                        match create_monitor_hwnd(options) {
+                            Ok(hwnd) => {
+                                let pending_close = Arc::new(AtomicBool::new(false));
+                                let in_frame = Arc::new(AtomicBool::new(false));
+                                let attach = CanvasAttach {
+                                    canvas_id: scene_id,
+                                    monitor_id: Some(monitor_id),
+                                    composite_scene_id: Some(scene_id),
+                                    surface_handle,
+                                    logical_w,
+                                    logical_h,
+                                    render_w,
+                                    render_h,
+                                };
+                                match build_attachment(hwnd, attach, pending_close.clone(), options.click_through()) {
+                                    Ok(a) => {
+                                        unsafe { let _ = ShowWindow(hwnd, SW_SHOW); }
+                                        windows.push(MonitorWindow {
+                                            id: window_id,
+                                            hwnd,
+                                            options,
+                                            owner_app_id: options.owner_app_id,
+                                            core_monitor_id: Some(monitor_id),
+                                            pending_close,
+                                            in_frame,
+                                            attachment: Some(a),
+                                        });
+                                        set_window_title(hwnd, AttachState::Composite { scene_id });
+                                        println!("[desktop-monitor] re-created window {} for composite scene {}", window_id, scene_id);
+                                    }
+                                    Err(e) => {
+                                        unsafe { let _ = DestroyWindow(hwnd); }
+                                        eprintln!("[desktop-monitor] re-create composite attach failed: {e}");
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("[desktop-monitor] re-create composite window failed: {e}"),
+                        }
+                    }
                     PipeEvent::Message { window_id, msg: ControlMessage::MonitorLocalSurfaceAttached {
                         canvas_id, monitor_id, surface_handle, ..
                     } } => {
@@ -1086,7 +1208,7 @@ async fn run_as_monitor_process(
                         if let Some(window) = windows.iter_mut().find(|w| w.id == window_id && !w.pending_close.load(Ordering::SeqCst)) {
                             window.core_monitor_id = Some(monitor_id);
                             if let Some(ref mut att) = window.attachment {
-                                if att._canvas_id == canvas_id {
+                                if att._composite_scene_id.is_none() && att._canvas_id == canvas_id {
                                     match hot_attach_ml(att, surface_handle) {
                                         Ok(()) => {
                                             set_window_title(window.hwnd, AttachState::Attached { canvas_id, ml: true });

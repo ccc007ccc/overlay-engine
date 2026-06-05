@@ -540,7 +540,9 @@ proptest! {
 // distinct handoff message with its own payload shape.
 // ---------------------------------------------------------------------------
 
-use core_server::ipc::protocol::OP_MONITOR_LOCAL_SURFACE_ATTACHED;
+use core_server::ipc::protocol::{
+    OP_MONITOR_COMPOSITE_ATTACHED, OP_MONITOR_LOCAL_SURFACE_ATTACHED,
+};
 
 fn canonical_monitor_local_surface_samples() -> Vec<ControlMessage> {
     vec![
@@ -602,6 +604,76 @@ fn any_monitor_local_surface_attached() -> impl Strategy<Value = ControlMessage>
         )
 }
 
+fn canonical_monitor_composite_surface_samples() -> Vec<ControlMessage> {
+    vec![
+        ControlMessage::MonitorCompositeAttached {
+            monitor_id: 0,
+            scene_id: 0,
+            surface_handle: 0,
+            logical_w: 0,
+            logical_h: 0,
+            render_w: 0,
+            render_h: 0,
+        },
+        ControlMessage::MonitorCompositeAttached {
+            monitor_id: 1,
+            scene_id: 2,
+            surface_handle: 0x1234_5678_9ABC_DEF0,
+            logical_w: 1920,
+            logical_h: 1080,
+            render_w: 3840,
+            render_h: 2160,
+        },
+        ControlMessage::MonitorCompositeAttached {
+            monitor_id: u32::MAX,
+            scene_id: u32::MAX,
+            surface_handle: u64::MAX,
+            logical_w: u32::MAX,
+            logical_h: u32::MAX,
+            render_w: u32::MAX,
+            render_h: u32::MAX,
+        },
+    ]
+}
+
+fn build_monitor_composite_surface_oracle() -> Vec<u8> {
+    let samples = canonical_monitor_composite_surface_samples();
+    let mut out = Vec::new();
+    out.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    for m in &samples {
+        let bytes = encode_one(m);
+        out.extend_from_slice(&m.opcode().to_le_bytes());
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&bytes);
+    }
+    out
+}
+
+fn any_monitor_composite_attached() -> impl Strategy<Value = ControlMessage> {
+    (
+        any::<u32>(),
+        any::<u32>(),
+        any::<u64>(),
+        any::<u32>(),
+        any::<u32>(),
+        any::<u32>(),
+        any::<u32>(),
+    )
+        .prop_map(
+            |(monitor_id, scene_id, surface_handle, logical_w, logical_h, render_w, render_h)| {
+                ControlMessage::MonitorCompositeAttached {
+                    monitor_id,
+                    scene_id,
+                    surface_handle,
+                    logical_w,
+                    logical_h,
+                    render_w,
+                    render_h,
+                }
+            },
+        )
+}
+
 #[test]
 fn pbt_a_prime_oracle_capture_monitor_local_surface_attached() {
     // New oracle file for the new variant. Keeping this separate from
@@ -623,6 +695,24 @@ fn pbt_a_prime_oracle_capture_monitor_local_surface_attached() {
     }
 }
 
+#[test]
+fn pbt_a_prime_oracle_capture_monitor_composite_attached() {
+    let path = oracle_path("control_plane_monitor_composite_surface_bytes.bin");
+    let oracle = build_monitor_composite_surface_oracle();
+    capture_or_verify_bytes(&path, &oracle);
+
+    for m in canonical_monitor_composite_surface_samples() {
+        assert_standard_header(&m);
+        assert_roundtrip_bit_identical(&m);
+        assert_eq!(
+            m.opcode(),
+            OP_MONITOR_COMPOSITE_ATTACHED,
+            "composite variant must use opcode {:#06x}",
+            OP_MONITOR_COMPOSITE_ATTACHED
+        );
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 128,
@@ -640,6 +730,14 @@ proptest! {
     #[test]
     fn pbt_a_prime_monitor_local_surface_attached_roundtrip(
         msg in any_monitor_local_surface_attached()
+    ) {
+        assert_standard_header(&msg);
+        assert_roundtrip_bit_identical(&msg);
+    }
+
+    #[test]
+    fn pbt_a_prime_monitor_composite_attached_roundtrip(
+        msg in any_monitor_composite_attached()
     ) {
         assert_standard_header(&msg);
         assert_roundtrip_bit_identical(&msg);

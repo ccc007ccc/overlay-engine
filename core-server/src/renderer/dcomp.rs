@@ -341,6 +341,7 @@ pub(crate) fn present_manager(manager: &IPresentationManager, log_name: &str) ->
 pub struct CanvasResources {
     pub render_w: u32,
     pub render_h: u32,
+    pub last_presented_idx: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     // COM children before parents: Rust drops fields in declaration order.
     // IPresentationBuffer / IPresentationSurface were created by the
     // IPresentationManager; releasing the manager first can invalidate
@@ -451,6 +452,9 @@ impl CanvasResources {
             surface,
             render_w,
             render_h,
+            last_presented_idx: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                usize::MAX,
+            )),
             buffers,
             available_events: available_events.into_vec(),
             textures,
@@ -514,6 +518,8 @@ impl CanvasResources {
             // clear is best-effort. The steady-state loop in server_task.rs
             // uses the classified `present()` directly.
             let _ = self.present();
+            self.last_presented_idx
+                .store(idx, std::sync::atomic::Ordering::Relaxed);
             windows::Win32::System::Threading::SleepEx(0, true);
             while self.manager.GetNextPresentStatistics().is_ok() {}
         }
@@ -572,6 +578,15 @@ pub struct PerMonitorResources {
 
 unsafe impl Send for PerMonitorResources {}
 unsafe impl Sync for PerMonitorResources {}
+
+/// Core-side MonitorScene composite output surface.
+///
+/// It intentionally reuses the `PerMonitorResources` presentation-surface
+/// implementation: same DComp NT handle, same multi-buffer ring, same bounded
+/// acquire/present policy. The semantic difference is ownership: one instance is
+/// keyed by `monitor_id` in `ServerState::monitor_scene_outputs` and contains
+/// Core's already-composited scene instead of MonitorLocal-only app commands.
+pub type CompositeOutputResources = PerMonitorResources;
 
 impl Drop for PerMonitorResources {
     fn drop(&mut self) {

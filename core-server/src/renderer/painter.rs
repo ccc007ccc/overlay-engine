@@ -282,6 +282,37 @@ impl D2DEngine {
         Ok(bitmap)
     }
 
+    /// 把 D3D11 texture 包装成可作为 D2D source 采样的 Bitmap1。
+    ///
+    /// Core compositor 用它把各 Canvas 最近一次提交的 World buffer
+    /// 绘制到单一 MonitorScene output surface。这里不能复用
+    /// [`create_target_bitmap`]，因为 target bitmap 带
+    /// `D2D1_BITMAP_OPTIONS_CANNOT_DRAW`，D2D 不能把它当 source 采样。
+    pub(crate) fn create_source_bitmap(
+        &self,
+        texture: &ID3D11Texture2D,
+    ) -> RendererResult<ID2D1Bitmap1> {
+        let dxgi_surface: IDXGISurface = texture.cast().map_err(RendererError::FrameAcquire)?;
+
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: ManuallyDrop::new(None),
+        };
+
+        let bitmap = unsafe {
+            self.dc
+                .CreateBitmapFromDxgiSurface(&dxgi_surface, Some(&props))
+                .map_err(RendererError::FrameAcquire)?
+        };
+        Ok(bitmap)
+    }
+
     /// 阶段 3.1：按 (font_size 量化) 拿/造 IDWriteTextFormat。
     ///
     /// 命中：HashMap O(1) + clone（COM AddRef）≈ < 1us。

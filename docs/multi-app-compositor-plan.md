@@ -32,7 +32,7 @@ App C ─ Canvas C ─ Layer C ┘
 
 - 不让 Game Bar widget 自己管理跨 App z-order / clip / focus / authorization。
 - 不让 Desktop monitor 和 Game Bar widget 各自实现一套 compositor policy。
-- 不恢复全局 ownerless auto attach；短期只允许 App 用 `StartMonitor(GameBar)` 显式绑定当前空闲 Widget。
+- 不恢复全局 ownerless auto attach；App 必须用 `StartMonitor(GameBar)` 显式加入一个已打开的 Game Bar Widget。Widget 实例数仍为 1，但同一个 `MonitorScene` 可以承载多个 App layer。
 - 不让多个 App 直接并发写同一张 Canvas 作为默认方案。
 
 理由：Core 是唯一能同时看到 App ownership、Canvas、Monitor、IPC lifecycle 和 GPU resources 的地方。合成策略放在 Core 才能保持 Desktop 与 Game Bar 行为一致。
@@ -254,7 +254,7 @@ Game Bar 初期不走 LayerSurfaces，避免 UWP/WinUI visual tree 内承担太�
 - App 只能更新自己拥有的 Layer / VirtualWindow。
 - Monitor 不能主动查询或 attach 任意 Canvas。
 - Game Bar 是手动生命周期 Monitor，不主动启动 Core，也不替 App 绕过授权。
-- Core 不应接受 ownerless global attach；Game Bar 的临时单 Canvas 绑定必须由 App 显式请求，且只绑定空闲 Widget。
+- Core 不应接受 ownerless global attach；Game Bar layer 必须由 App 通过 `StartMonitor(GameBar)` 显式加入已打开 Widget 对应的 shared `MonitorScene`。
 
 新增授权策略建议：
 

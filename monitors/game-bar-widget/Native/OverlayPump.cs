@@ -29,7 +29,8 @@ namespace OverlayWidget.Native
             RegisterMonitor = 0x0002,
             CanvasAttached = 0x0005,
             MonitorLocalAttached = 0x0007,
-            AppDetached = 0x0008
+            AppDetached = 0x0008,
+            MonitorCompositeAttached = 0x0011
         }
 
         private readonly FrameworkElement _hostElement;
@@ -57,6 +58,7 @@ namespace OverlayWidget.Native
         private double _lastScale = 1.0;
         private float _lastWorldDipW;
         private float _lastWorldDipH;
+        private bool _worldLayerUsesScreenSpace = true;
         private long _nextWindowSampleTicks;
         private long _fastPollUntilTicks;
 
@@ -179,6 +181,7 @@ namespace OverlayWidget.Native
                     {
                         try
                         {
+                            _worldLayerUsesScreenSpace = true;
                             _worldLayer.MountSurface(new IntPtr(handleRaw), logW, logH);
                             EnsureRenderingSubscribed();
                             MarkLayoutDirty();
@@ -186,6 +189,32 @@ namespace OverlayWidget.Native
                             OnStatusChanged?.Invoke($"Attached World Canvas: {logW}x{logH}");
                         }
                         catch (Exception ex) { Debug.WriteLine($"[OverlayPump] MountWorldSurface threw: {ex}"); }
+                    });
+                    break;
+                }
+                case IpcOpcode.MonitorCompositeAttached:
+                {
+                    if (payloadLen < 32) break;
+                    uint sceneId = ReadUInt32LittleEndian(payload, 4);
+                    long handleRaw = unchecked((long)ReadUInt64LittleEndian(payload, 8));
+                    uint logW = ReadUInt32LittleEndian(payload, 16);
+                    uint logH = ReadUInt32LittleEndian(payload, 20);
+                    uint renderW = ReadUInt32LittleEndian(payload, 24);
+                    uint renderH = ReadUInt32LittleEndian(payload, 28);
+
+                    _ = _hostElement.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
+                    {
+                        try
+                        {
+                            _worldLayerUsesScreenSpace = false;
+                            _mlLayer?.Clear();
+                            _worldLayer.MountSurface(new IntPtr(handleRaw), logW, logH);
+                            EnsureRenderingSubscribed();
+                            MarkLayoutDirty();
+                            TryUpdateVisualTransform(force: true);
+                            OnStatusChanged?.Invoke($"Attached Composite Scene {sceneId}: {logW}x{logH} ({renderW}x{renderH})");
+                        }
+                        catch (Exception ex) { Debug.WriteLine($"[OverlayPump] MountCompositeSurface threw: {ex}"); }
                     });
                     break;
                 }
@@ -225,6 +254,7 @@ namespace OverlayWidget.Native
         private void ClearAllSurfaces()
         {
             UnsubscribeRendering();
+            _worldLayerUsesScreenSpace = true;
             _worldLayer?.Clear();
             _mlLayer?.Clear();
             ResetTransformCache();
@@ -243,6 +273,14 @@ namespace OverlayWidget.Native
         private void TryUpdateVisualTransform(bool force)
         {
             if (_worldLayer == null || !_worldLayer.IsMounted || _hwnd == IntPtr.Zero) return;
+
+            if (!_worldLayerUsesScreenSpace)
+            {
+                double compositeScale = _hostElement.XamlRoot?.RasterizationScale ?? 1.0;
+                if (compositeScale <= 0) compositeScale = 1.0;
+                _worldLayer.SetFixedTransform(0, 0, (float)(_worldLayer.LogicalW / compositeScale), (float)(_worldLayer.LogicalH / compositeScale));
+                return;
+            }
 
             long now = DateTime.UtcNow.Ticks;
             if (!force && now < _nextWindowSampleTicks) return;

@@ -76,6 +76,7 @@ pub const OP_START_MONITOR_RESULT: u16 = 0x000D;
 pub const OP_STOP_MONITOR: u16 = 0x000E;
 pub const OP_STOP_MONITOR_RESULT: u16 = 0x000F;
 pub const OP_CLOSE_MONITOR: u16 = 0x0010;
+pub const OP_MONITOR_COMPOSITE_ATTACHED: u16 = 0x0011;
 
 pub const DESKTOP_WINDOW_MODE_BORDERED: u32 = 1 << 0;
 pub const DESKTOP_WINDOW_MODE_BORDERLESS: u32 = 1 << 1;
@@ -262,6 +263,15 @@ pub enum ControlMessage {
         logical_w: u32,
         logical_h: u32,
     },
+    MonitorCompositeAttached {
+        monitor_id: u32,
+        scene_id: u32,
+        surface_handle: u64,
+        logical_w: u32,
+        logical_h: u32,
+        render_w: u32,
+        render_h: u32,
+    },
     AppDetached {
         app_id: u32,
         reason: u8,
@@ -316,6 +326,7 @@ fn fixed_payload_len(opcode: u16) -> Option<usize> {
         OP_CANVAS_ATTACHED => Some(28),
         OP_SUBMIT_FRAME => Some(20),
         OP_MONITOR_LOCAL_SURFACE_ATTACHED => Some(24),
+        OP_MONITOR_COMPOSITE_ATTACHED => Some(32),
         OP_APP_DETACHED | OP_STOP_MONITOR_RESULT => Some(5),
         OP_START_MONITOR => Some(34),
         _ => None,
@@ -332,6 +343,7 @@ impl ControlMessage {
             Self::CanvasAttached { .. } => OP_CANVAS_ATTACHED,
             Self::SubmitFrame { .. } => OP_SUBMIT_FRAME,
             Self::MonitorLocalSurfaceAttached { .. } => OP_MONITOR_LOCAL_SURFACE_ATTACHED,
+            Self::MonitorCompositeAttached { .. } => OP_MONITOR_COMPOSITE_ATTACHED,
             Self::AppDetached { .. } => OP_APP_DETACHED,
             Self::LoadBitmap { .. } => OP_LOAD_BITMAP,
             Self::ListMonitorTypes { .. } => OP_LIST_MONITOR_TYPES,
@@ -431,6 +443,24 @@ impl ControlMessage {
                 buf.put_u64_le(*surface_handle);
                 buf.put_u32_le(*logical_w);
                 buf.put_u32_le(*logical_h);
+            }
+            Self::MonitorCompositeAttached {
+                monitor_id,
+                scene_id,
+                surface_handle,
+                logical_w,
+                logical_h,
+                render_w,
+                render_h,
+            } => {
+                encode_header(self.opcode(), 32, buf);
+                buf.put_u32_le(*monitor_id);
+                buf.put_u32_le(*scene_id);
+                buf.put_u64_le(*surface_handle);
+                buf.put_u32_le(*logical_w);
+                buf.put_u32_le(*logical_h);
+                buf.put_u32_le(*render_w);
+                buf.put_u32_le(*render_h);
             }
             Self::AppDetached { app_id, reason } => {
                 encode_header(self.opcode(), 5, buf);
@@ -585,6 +615,15 @@ impl ControlMessage {
                 surface_handle: buf.get_u64_le(),
                 logical_w: buf.get_u32_le(),
                 logical_h: buf.get_u32_le(),
+            }),
+            OP_MONITOR_COMPOSITE_ATTACHED => Ok(Self::MonitorCompositeAttached {
+                monitor_id: buf.get_u32_le(),
+                scene_id: buf.get_u32_le(),
+                surface_handle: buf.get_u64_le(),
+                logical_w: buf.get_u32_le(),
+                logical_h: buf.get_u32_le(),
+                render_w: buf.get_u32_le(),
+                render_h: buf.get_u32_le(),
             }),
             OP_APP_DETACHED => Ok(Self::AppDetached {
                 app_id: buf.get_u32_le(),
@@ -743,6 +782,15 @@ mod tests {
                 surface_handle: 0x5678,
                 logical_w: 1920,
                 logical_h: 1080,
+            },
+            ControlMessage::MonitorCompositeAttached {
+                monitor_id: 10,
+                scene_id: 11,
+                surface_handle: 0x9ABC,
+                logical_w: 1920,
+                logical_h: 1080,
+                render_w: 3840,
+                render_h: 2160,
             },
             ControlMessage::AppDetached {
                 app_id: 10,

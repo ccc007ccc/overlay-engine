@@ -2,8 +2,8 @@
 //! (hotfix-visible-render spec — Change-B / 修 1.2).
 //!
 //! Factored out of `src/bin/monitor.rs` so the three attach states
-//! — `Connecting`, `Attached { canvas_id, ml }`, `Reconnecting` — can be
-//! unit-tested without standing up a real `HWND`, without pulling in the
+//! — `Connecting`, `Attached { canvas_id, ml }`, `Composite { scene_id }`,
+//! `Reconnecting` — can be unit-tested without standing up a real `HWND`, without pulling in the
 //! Win32 `SetWindowTextW` call, and without any DComp / D3D state.
 //!
 //! The strings are exactly those prescribed by design.md §Fix Implementation
@@ -12,6 +12,7 @@
 //!   * `Connecting`                              → `"Desktop Monitor - connecting..."`
 //!   * `Attached { canvas_id, ml: false }`       → `"Desktop Monitor - canvas {id} (world only)"`
 //!   * `Attached { canvas_id, ml: true }`        → `"Desktop Monitor - canvas {id} (world + monitor_local)"`
+//!   * `Composite { scene_id }`                  → `"Desktop Monitor - scene {id} (composite)"`
 //!   * `Reconnecting`                            → `"Desktop Monitor - reconnecting..."`
 //!
 //! The `"Desktop Monitor - "` prefix is kept across every variant so
@@ -32,6 +33,8 @@ pub enum AttachState {
     /// dual-visual tree was mounted; `ml == false` means the World-only
     /// attach path was taken (older Core or `ml_info == None`).
     Attached { canvas_id: u32, ml: bool },
+    /// Core compositor output surface mounted for a full MonitorScene.
+    Composite { scene_id: u32 },
     /// A non-timeout I/O error was observed on the control-plane pipe
     /// after attach (design.md §Fix Implementation → Change-B, third
     /// call site).
@@ -59,6 +62,9 @@ pub fn format_window_title(state: AttachState) -> String {
             ml: true,
         } => {
             format!("Desktop Monitor - canvas {canvas_id} (world + monitor_local)")
+        }
+        AttachState::Composite { scene_id } => {
+            format!("Desktop Monitor - scene {scene_id} (composite)")
         }
         AttachState::Reconnecting => "Desktop Monitor - reconnecting...".to_string(),
     }
@@ -106,6 +112,14 @@ mod tests {
     }
 
     #[test]
+    fn composite_contains_scene_id_and_composite_marker() {
+        assert_eq!(
+            format_window_title(AttachState::Composite { scene_id: 9 }),
+            "Desktop Monitor - scene 9 (composite)"
+        );
+    }
+
+    #[test]
     fn reconnecting_has_its_own_distinct_suffix() {
         assert_eq!(
             format_window_title(AttachState::Reconnecting),
@@ -127,6 +141,7 @@ mod tests {
                 canvas_id: 1,
                 ml: true,
             },
+            AttachState::Composite { scene_id: 2 },
             AttachState::Reconnecting,
         ];
         for state in cases {
@@ -176,15 +191,19 @@ mod tests {
     }
 
     #[test]
-    fn connecting_and_reconnecting_are_distinguishable() {
+    fn connecting_composite_and_reconnecting_are_distinguishable() {
         // If these ever collided, `isBugCondition_title` would be
         // unfalsifiable at runtime (the probe cannot tell `connecting...`
         // from `reconnecting...` apart on unfixed code).
         let c = format_window_title(AttachState::Connecting);
+        let composite = format_window_title(AttachState::Composite { scene_id: 1 });
         let r = format_window_title(AttachState::Reconnecting);
+        assert_ne!(c, composite);
         assert_ne!(c, r);
+        assert_ne!(composite, r);
         assert!(c.contains("connecting..."));
         assert!(!c.contains("reconnecting"));
+        assert!(composite.contains("composite"));
         assert!(r.contains("reconnecting..."));
     }
 }

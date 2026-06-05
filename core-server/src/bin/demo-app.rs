@@ -38,6 +38,8 @@ static STRIPES_PNG: &[u8] = include_bytes!("../../assets/demo-textures/stripes.p
 struct DemoOptions {
     unlocked: bool,
     desktop_monitors: u32,
+    game_bar: bool,
+    smoke_index: u32,
     window_mode: DesktopWindowMode,
     click_through: bool,
 }
@@ -47,6 +49,8 @@ impl Default for DemoOptions {
         Self {
             unlocked: false,
             desktop_monitors: 3,
+            game_bar: false,
+            smoke_index: 0,
             window_mode: DesktopWindowMode::Bordered,
             click_through: false,
         }
@@ -64,6 +68,13 @@ fn parse_demo_options() -> anyhow::Result<Option<DemoOptions>> {
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("--desktop-monitors requires a count"))?;
                 options.desktop_monitors = value.parse()?;
+            }
+            "--game-bar" => options.game_bar = true,
+            "--smoke-index" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--smoke-index requires a value"))?;
+                options.smoke_index = value.parse()?;
             }
             "--window-mode" => {
                 let value = args
@@ -100,7 +111,7 @@ fn window_mode_label(mode: DesktopWindowMode) -> &'static str {
 }
 
 fn print_usage() {
-    println!("Usage: demo-app [--unlocked] [--desktop-monitors N] [--window-mode bordered|borderless|fullscreen] [--click-through]");
+    println!("Usage: demo-app [--unlocked] [--desktop-monitors N] [--game-bar] [--smoke-index N] [--window-mode bordered|borderless|fullscreen] [--click-through]");
     println!("Default: --desktop-monitors 3 --window-mode bordered");
 }
 
@@ -680,6 +691,146 @@ fn write_complex_animation_scene(buf: &mut [u8], pos: &mut usize, cw: f32, ch: f
     );
 }
 
+fn write_game_bar_smoke_scene(
+    buf: &mut [u8],
+    pos: &mut usize,
+    cw: f32,
+    ch: f32,
+    t: f32,
+    smoke_index: u32,
+    current_fps: f32,
+) {
+    if smoke_index == 1 {
+        write_cmd_clear(buf, pos, 0.01, 0.03, 0.16, 1.0);
+        write_cmd_fill_rect(buf, pos, 0.0, 0.0, cw, 180.0, 0.02, 0.22, 0.90, 1.0);
+        write_cmd_stroke_rect(
+            buf,
+            pos,
+            24.0,
+            24.0,
+            cw - 48.0,
+            ch - 48.0,
+            18.0,
+            0.0,
+            0.9,
+            1.0,
+            1.0,
+        );
+        write_cmd_draw_text(
+            buf,
+            pos,
+            "APP 1 BASE / BLUE FULLSCREEN",
+            80.0,
+            66.0,
+            64.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        write_cmd_draw_text(
+            buf,
+            pos,
+            "APP 1 ORANGE BOX moves while APP 2 cyan box moves on top",
+            86.0,
+            142.0,
+            28.0,
+            0.72,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let x = ((cw * 0.5 - 65.0) + (t * 1.15).sin() * (cw * 0.22).min(520.0))
+            .clamp(80.0, (cw - 210.0).max(80.0));
+        let y = (ch * 0.55 + (t * 0.85).cos() * 70.0).clamp(220.0, (ch - 250.0).max(220.0));
+        write_cmd_fill_rect(buf, pos, x, y, 130.0, 130.0, 1.0, 0.45, 0.0, 1.0);
+        write_cmd_draw_text(
+            buf,
+            pos,
+            &format!("APP 1 FPS {:.0}", current_fps),
+            80.0,
+            ch - 120.0,
+            42.0,
+            0.0,
+            1.0,
+            0.35,
+            1.0,
+        );
+        return;
+    }
+
+    write_cmd_clear(buf, pos, 0.0, 0.0, 0.0, 0.0);
+    write_cmd_fill_rect(
+        buf,
+        pos,
+        44.0,
+        44.0,
+        cw - 88.0,
+        ch - 88.0,
+        0.22,
+        0.0,
+        0.22,
+        0.22,
+    );
+    write_cmd_stroke_rect(
+        buf,
+        pos,
+        44.0,
+        44.0,
+        cw - 88.0,
+        ch - 88.0,
+        26.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+    );
+    write_cmd_fill_rect(buf, pos, 70.0, 70.0, cw - 140.0, 108.0, 1.0, 1.0, 0.0, 1.0);
+    write_cmd_draw_text(
+        buf,
+        pos,
+        "APP 2 OVERLAY",
+        96.0,
+        94.0,
+        58.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    );
+    write_cmd_draw_text(
+        buf,
+        pos,
+        "22% transparent magenta + moving cyan box",
+        96.0,
+        184.0,
+        38.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    );
+    let line_y = (230.0 + (t * 1.3).sin() * 90.0).clamp(220.0, (ch - 120.0).max(220.0));
+    write_cmd_draw_line(
+        buf,
+        pos,
+        70.0,
+        ch - 80.0,
+        cw - 70.0,
+        line_y,
+        10.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0,
+    );
+    let x = ((cw * 0.55 - 60.0) + (t * 1.55).sin() * (cw * 0.30).min(260.0))
+        .clamp(70.0, (cw - 190.0).max(70.0));
+    let y = (ch * 0.62 - 45.0 + (t * 1.05).cos() * (ch * 0.12).min(90.0))
+        .clamp(230.0, (ch - 180.0).max(230.0));
+    write_cmd_fill_rect(buf, pos, x, y, 120.0, 90.0, 0.0, 1.0, 0.75, 1.0);
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let Some(options) = parse_demo_options()? else {
@@ -689,11 +840,25 @@ async fn main() -> anyhow::Result<()> {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(1) as u32;
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(1) as u32;
+    let (canvas_w, canvas_h) = if options.game_bar && options.smoke_index > 1 {
+        (
+            (screen_w.saturating_mul(2) / 5).max(320).min(screen_w),
+            (screen_h.saturating_mul(2) / 5).max(240).min(screen_h),
+        )
+    } else {
+        (screen_w, screen_h)
+    };
     println!("[demo-app] 屏幕分辨率: {}x{}", screen_w, screen_h);
     if options.unlocked {
         println!("[demo-app] 模式: 无帧数限制 (Unlocked)");
     } else {
         println!("[demo-app] 模式: DWM VSync (锁定帧率)");
+    }
+    if options.game_bar {
+        println!(
+            "[demo-app] Game Bar smoke: enabled, app index={}",
+            options.smoke_index
+        );
     }
     println!("[demo-app] 连接 {}...", PIPE_NAME);
 
@@ -735,15 +900,15 @@ async fn main() -> anyhow::Result<()> {
     send_control_message(
         &mut client,
         ControlMessage::CreateCanvas {
-            logical_w: screen_w,
-            logical_h: screen_h,
-            render_w: screen_w,
-            render_h: screen_h,
+            logical_w: canvas_w,
+            logical_h: canvas_h,
+            render_w: canvas_w,
+            render_h: canvas_h,
         },
         &mut buf,
     )
     .await?;
-    println!("[demo-app] 已创建画布 {}x{}", screen_w, screen_h);
+    println!("[demo-app] 已创建画布 {}x{}", canvas_w, canvas_h);
 
     let list_request_id = 1;
     send_control_message(
@@ -790,11 +955,39 @@ async fn main() -> anyhow::Result<()> {
         let (status, monitor_ids) =
             wait_start_monitor_result(&mut client, start_request_id).await?;
         if status != MonitorRequestStatus::Ok {
-            anyhow::bail!("StartMonitor failed: {status:?}");
+            anyhow::bail!("StartMonitor DesktopWindow failed: {status:?}");
         }
         println!("[demo-app] Desktop monitor 已启动: {:?}", monitor_ids);
     } else {
         println!("[demo-app] 未请求 Desktop monitor；可手动打开 Game Bar widget 或使用 --desktop-monitors N");
+    }
+
+    if options.game_bar {
+        let start_request_id = 3;
+        println!("[demo-app] 请求加入当前打开的 Game Bar Widget");
+        send_control_message(
+            &mut client,
+            ControlMessage::StartMonitor {
+                request_id: start_request_id,
+                kind: MonitorKind::GameBar,
+                count: 1,
+                target_canvas_id: 0,
+                mode: DesktopWindowMode::Borderless,
+                flags: 0,
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+            &mut buf,
+        )
+        .await?;
+        let (status, monitor_ids) =
+            wait_start_monitor_result(&mut client, start_request_id).await?;
+        if status != MonitorRequestStatus::Ok {
+            anyhow::bail!("StartMonitor GameBar failed: {status:?}");
+        }
+        println!("[demo-app] Game Bar Widget 已绑定: {:?}", monitor_ids);
     }
 
     // 打开共享内存
@@ -829,8 +1022,8 @@ async fn main() -> anyhow::Result<()> {
     // 持续渲染循环
     println!("[demo-app] 开始渲染循环（DWM vsync，Ctrl+C 退出）...");
     let mut frame_id: u64 = 0;
-    let cw = screen_w as f32;
-    let ch = screen_h as f32;
+    let cw = canvas_w as f32;
+    let ch = canvas_h as f32;
 
     let mut last_fps_time = std::time::Instant::now();
     let mut fps_frame_count: u64 = 0;
@@ -860,187 +1053,199 @@ async fn main() -> anyhow::Result<()> {
         let cmd_offset = current_offset;
         let mut pos = cmd_offset as usize;
 
-        // CLEAR：深色半透明背景（premultiplied: rgb *= alpha）
-        let bg_a = 0.5_f32;
-        write_cmd_clear(
-            shmem_bytes,
-            &mut pos,
-            0.03 * bg_a,
-            0.03 * bg_a,
-            0.06 * bg_a,
-            bg_a,
-        );
+        if options.game_bar && options.smoke_index > 0 {
+            write_game_bar_smoke_scene(
+                shmem_bytes,
+                &mut pos,
+                cw,
+                ch,
+                t,
+                options.smoke_index,
+                current_fps,
+            );
+        } else {
+            // CLEAR：深色半透明背景（premultiplied: rgb *= alpha）
+            let bg_a = 0.5_f32;
+            write_cmd_clear(
+                shmem_bytes,
+                &mut pos,
+                0.03 * bg_a,
+                0.03 * bg_a,
+                0.06 * bg_a,
+                bg_a,
+            );
 
-        // 屏幕中心十字
-        let cross_w = 4.0;
-        let cross_len = cw.min(ch) * 0.15;
-        // 水平线（绿）
-        write_cmd_fill_rect(
-            shmem_bytes,
-            &mut pos,
-            cw * 0.5 - cross_len * 0.5,
-            ch * 0.5 - cross_w * 0.5,
-            cross_len,
-            cross_w,
-            0.2,
-            0.9,
-            0.2,
-            1.0,
-        );
-        // 竖直线（红）
-        write_cmd_fill_rect(
-            shmem_bytes,
-            &mut pos,
-            cw * 0.5 - cross_w * 0.5,
-            ch * 0.5 - cross_len * 0.5,
-            cross_w,
-            cross_len,
-            0.9,
-            0.2,
-            0.2,
-            1.0,
-        );
+            // 屏幕中心十字
+            let cross_w = 4.0;
+            let cross_len = cw.min(ch) * 0.15;
+            // 水平线（绿）
+            write_cmd_fill_rect(
+                shmem_bytes,
+                &mut pos,
+                cw * 0.5 - cross_len * 0.5,
+                ch * 0.5 - cross_w * 0.5,
+                cross_len,
+                cross_w,
+                0.2,
+                0.9,
+                0.2,
+                1.0,
+            );
+            // 竖直线（红）
+            write_cmd_fill_rect(
+                shmem_bytes,
+                &mut pos,
+                cw * 0.5 - cross_w * 0.5,
+                ch * 0.5 - cross_len * 0.5,
+                cross_w,
+                cross_len,
+                0.9,
+                0.2,
+                0.2,
+                1.0,
+            );
 
-        // 四角色块
-        let block = 80.0;
-        let margin = 40.0;
-        // 右上（yellow） — World space: 单张全局画布的右上角,所有 monitor
-        // 共享同一张 surface,它们会看到此色块在同一画布位置的不同视角。
-        write_cmd_fill_rect(
-            shmem_bytes,
-            &mut pos,
-            cw - margin - block,
-            margin,
-            block,
-            block,
-            0.9,
-            0.9,
-            0.0,
-            1.0,
-        );
-        // 左下（magenta） — World space
-        write_cmd_fill_rect(
-            shmem_bytes,
-            &mut pos,
-            margin,
-            ch - margin - block,
-            block,
-            block,
-            0.9,
-            0.0,
-            0.9,
-            1.0,
-        );
-        // 右下（white） — World space
-        write_cmd_fill_rect(
-            shmem_bytes,
-            &mut pos,
-            cw - margin - block,
-            ch - margin - block,
-            block,
-            block,
-            0.9,
-            0.9,
-            0.9,
-            1.0,
-        );
+            // 四角色块
+            let block = 80.0;
+            let margin = 40.0;
+            // 右上（yellow） — World space: 单张全局画布的右上角,所有 monitor
+            // 共享同一张 surface,它们会看到此色块在同一画布位置的不同视角。
+            write_cmd_fill_rect(
+                shmem_bytes,
+                &mut pos,
+                cw - margin - block,
+                margin,
+                block,
+                block,
+                0.9,
+                0.9,
+                0.0,
+                1.0,
+            );
+            // 左下（magenta） — World space
+            write_cmd_fill_rect(
+                shmem_bytes,
+                &mut pos,
+                margin,
+                ch - margin - block,
+                block,
+                block,
+                0.9,
+                0.0,
+                0.9,
+                1.0,
+            );
+            // 右下（white） — World space
+            write_cmd_fill_rect(
+                shmem_bytes,
+                &mut pos,
+                cw - margin - block,
+                ch - margin - block,
+                block,
+                block,
+                0.9,
+                0.9,
+                0.9,
+                1.0,
+            );
 
-        // 动态色块（左右来回移动） — World space
-        let anim_x = cw * 0.5 + (t.sin() * cw * 0.3);
-        let anim_y = ch * 0.3;
-        write_cmd_fill_rect(
-            shmem_bytes,
-            &mut pos,
-            anim_x - 30.0,
-            anim_y - 30.0,
-            60.0,
-            60.0,
-            0.9,
-            0.5,
-            0.1,
-            1.0,
-        );
+            // 动态色块（左右来回移动） — World space
+            let anim_x = cw * 0.5 + (t.sin() * cw * 0.3);
+            let anim_y = ch * 0.3;
+            write_cmd_fill_rect(
+                shmem_bytes,
+                &mut pos,
+                anim_x - 30.0,
+                anim_y - 30.0,
+                60.0,
+                60.0,
+                0.9,
+                0.5,
+                0.1,
+                1.0,
+            );
 
-        write_complex_animation_scene(shmem_bytes, &mut pos, cw, ch, t);
+            write_complex_animation_scene(shmem_bytes, &mut pos, cw, ch, t);
 
-        // ---- MonitorLocal 区间开始 ---------------------------------
-        // 接下来的几个元素语义是"贴每个 monitor 客户区左上角"——
-        // Core 会把它们 replay 到每个 monitor 自己的 per-Monitor surface
-        // 上,使得每个窗口都独立在自己客户区 (10, 10) 附近看到 FPS 条/徽章
-        // (缺陷 B 的修复要求).
-        //
-        // 如果你起两个 desktop-window-monitor 并拖到屏幕不同位置:
-        //   * yellow/magenta/white 三个 World 块 仍然挂在同一张全局画布上,
-        //     每个窗口按自己的 viewport 透视;
-        //   * cyan 徽章 + FPS 条独立出现在两个窗口各自的 (margin, margin)
-        //     / (10, 10) 客户区位置 —— 这是修复前做不到的.
-        write_cmd_push_space(shmem_bytes, &mut pos, SPACE_ID_MONITOR_LOCAL);
+            // ---- MonitorLocal 区间开始 ---------------------------------
+            // 接下来的几个元素语义是"贴每个 monitor 客户区左上角"——
+            // Core 会把它们 replay 到每个 monitor 自己的 per-Monitor surface
+            // 上,使得每个窗口都独立在自己客户区 (10, 10) 附近看到 FPS 条/徽章
+            // (缺陷 B 的修复要求).
+            //
+            // 如果你起两个 desktop-window-monitor 并拖到屏幕不同位置:
+            //   * yellow/magenta/white 三个 World 块 仍然挂在同一张全局画布上,
+            //     每个窗口按自己的 viewport 透视;
+            //   * cyan 徽章 + FPS 条独立出现在两个窗口各自的 (margin, margin)
+            //     / (10, 10) 客户区位置 —— 这是修复前做不到的.
+            write_cmd_push_space(shmem_bytes, &mut pos, SPACE_ID_MONITOR_LOCAL);
 
-        // CLEAR MonitorLocal：必须加上这一步，否则多缓冲机制下上一帧的字会残留在屏幕上！
-        // 渲染背景完全透明，只保留我们的绘制内容。
-        write_cmd_clear(shmem_bytes, &mut pos, 0.0, 0.0, 0.0, 0.0);
+            // CLEAR MonitorLocal：必须加上这一步，否则多缓冲机制下上一帧的字会残留在屏幕上！
+            // 渲染背景完全透明，只保留我们的绘制内容。
+            write_cmd_clear(shmem_bytes, &mut pos, 0.0, 0.0, 0.0, 0.0);
 
-        // 左上 cyan 徽章(MonitorLocal): 每个 monitor 客户区左上 (margin, margin)
-        write_cmd_fill_rect(
-            shmem_bytes,
-            &mut pos,
-            margin,
-            margin,
-            block,
-            block,
-            0.0,
-            0.9,
-            0.9,
-            1.0,
-        );
+            // 左上 cyan 徽章(MonitorLocal): 每个 monitor 客户区左上 (margin, margin)
+            write_cmd_fill_rect(
+                shmem_bytes,
+                &mut pos,
+                margin,
+                margin,
+                block,
+                block,
+                0.0,
+                0.9,
+                0.9,
+                1.0,
+            );
 
-        let icon_size = 48.0 + wave01(t * 2.4) * 18.0;
-        write_cmd_draw_bitmap(
-            shmem_bytes,
-            &mut pos,
-            TEXTURE_ORB,
-            (0.0, 0.0, 0.0, 0.0),
-            (margin + 16.0, margin + 16.0, icon_size, icon_size),
-            0.88,
-            1,
-        );
+            let icon_size = 48.0 + wave01(t * 2.4) * 18.0;
+            write_cmd_draw_bitmap(
+                shmem_bytes,
+                &mut pos,
+                TEXTURE_ORB,
+                (0.0, 0.0, 0.0, 0.0),
+                (margin + 16.0, margin + 16.0, icon_size, icon_size),
+                0.88,
+                1,
+            );
 
-        // FPS 数字（左上角, MonitorLocal）
-        let fps_text = format!("{:.0} FPS", current_fps);
-        let font_size = 20.0_f32;
-        let char_w = font_size * 0.55;
-        let pad_x = 6.0_f32;
-        let line_h = font_size * 1.35;
-        let bg_w = fps_text.len() as f32 * char_w + pad_x * 2.0;
-        let bg_h = line_h + 4.0;
-        let bg_a = 0.45_f32;
-        write_cmd_fill_rect(
-            shmem_bytes,
-            &mut pos,
-            10.0,
-            10.0,
-            bg_w,
-            bg_h,
-            0.05 * bg_a,
-            0.05 * bg_a,
-            0.05 * bg_a,
-            bg_a,
-        );
-        write_cmd_draw_text(
-            shmem_bytes,
-            &mut pos,
-            &fps_text,
-            10.0 + pad_x,
-            10.0 + (bg_h - line_h) / 2.0,
-            font_size,
-            0.2,
-            0.9,
-            0.2,
-            1.0,
-        );
+            // FPS 数字（左上角, MonitorLocal）
+            let fps_text = format!("{:.0} FPS", current_fps);
+            let font_size = 20.0_f32;
+            let char_w = font_size * 0.55;
+            let pad_x = 6.0_f32;
+            let line_h = font_size * 1.35;
+            let bg_w = fps_text.len() as f32 * char_w + pad_x * 2.0;
+            let bg_h = line_h + 4.0;
+            let bg_a = 0.45_f32;
+            write_cmd_fill_rect(
+                shmem_bytes,
+                &mut pos,
+                10.0,
+                10.0,
+                bg_w,
+                bg_h,
+                0.05 * bg_a,
+                0.05 * bg_a,
+                0.05 * bg_a,
+                bg_a,
+            );
+            write_cmd_draw_text(
+                shmem_bytes,
+                &mut pos,
+                &fps_text,
+                10.0 + pad_x,
+                10.0 + (bg_h - line_h) / 2.0,
+                font_size,
+                0.2,
+                0.9,
+                0.2,
+                1.0,
+            );
 
-        write_cmd_pop_space(shmem_bytes, &mut pos);
-        // ---- MonitorLocal 区间结束 ---------------------------------
+            write_cmd_pop_space(shmem_bytes, &mut pos);
+            // ---- MonitorLocal 区间结束 ---------------------------------
+        }
 
         let cmd_length = (pos - cmd_offset as usize) as u32;
         if cmd_length > frame_max_size {
@@ -1053,6 +1258,7 @@ async fn main() -> anyhow::Result<()> {
             current_offset = 24;
         }
 
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
         send_control_message(
             &mut client,
             ControlMessage::SubmitFrame {
@@ -1065,7 +1271,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?;
 
-        if !options.unlocked {
+        if options.game_bar && options.smoke_index > 0 && !options.unlocked {
+            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+        } else if !options.unlocked {
             if let Err(e) = unsafe { DwmFlush() } {
                 eprintln!("[demo-app] DwmFlush failed: {}", e);
                 tokio::task::yield_now().await;

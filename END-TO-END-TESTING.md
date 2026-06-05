@@ -152,6 +152,22 @@ cargo run -p core-server --bin demo-app -- --desktop-monitors 1 --window-mode fu
 cargo run -p core-server --bin demo-app -- --desktop-monitors 1 --click-through
 ```
 
+### 可选：Game Bar 多 App 合成 smoke
+
+先按 `Win+G` 打开 Xbox Game Bar，并在小组件列表里打开 `Overlay Widget`。然后分别启动两个 demo app，它们都请求加入同一个已打开的 Game Bar Widget；第二个 app 会用较小 Canvas，便于观察 Core composite output 是否把两个 App 同时合成到单个 Widget 中。
+
+```powershell
+cargo run -p core-server --bin demo-app -- --desktop-monitors 0 --game-bar --smoke-index 1
+cargo run -p core-server --bin demo-app -- --desktop-monitors 0 --game-bar --smoke-index 2
+```
+
+验证点：
+
+1. 两个 demo app 都打印 `Game Bar Widget 已绑定: [<monitor_id>]`，且 `<monitor_id>` 相同。
+2. Core 终端同时出现两个不同 `canvas=<id>` 的 frame 日志。
+3. Game Bar Widget 里能看到全尺寸 App 内容，并叠加一个较小 App 内容；Widget 仍只有一个实例。
+4. Core 终端不应持续打印 `device-lost`、`composite SetBuffer error` 或 buffer acquire failed。
+
 ### 观察清单
 
 | # | 观察点 | 缺陷 A 现象(修复前) | 缺陷 A 预期(修复后) |
