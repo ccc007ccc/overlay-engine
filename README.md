@@ -48,9 +48,9 @@ App 连接 `\\.\pipe\overlay-core` 失败且 pipe 不存在时，会读取这些
 维护者或内部测试可以直接安装 release staging：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.3-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.4-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.3-x64" `
+  -SourceDir "dist/overlay-engine-0.1.4-x64" `
   -InstallDir "$env:LOCALAPPDATA\Programs\overlay-engine" `
   -Components Core,DesktopMonitor,GameBarWidget `
   -AutoStart `
@@ -61,9 +61,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 只安装 Core + Desktop Window Monitor：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.3-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.4-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.3-x64" `
+  -SourceDir "dist/overlay-engine-0.1.4-x64" `
   -Components Core,DesktopMonitor
 ```
 

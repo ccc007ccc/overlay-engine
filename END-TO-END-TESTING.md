@@ -40,18 +40,18 @@ Release 包不发布 `demo-app`、`demo-consumer` 或诊断/实验程序；demo 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts/build-release.ps1" `
   -Configuration Release `
   -Platform x64 `
-  -Version 0.1.3 `
+  -Version 0.1.4 `
   -SignMode Dev
 ```
 
-确认 `dist\overlay-engine-0.1.3-x64\manifest.json` 的版本为 `0.1.3`，`widget` 目录中的 MSIX 为 `OverlayWidget_0.1.3.0_x64.msix`，且 `dist\overlay-engine-0.1.3-x64\app` 中只有正式组件，不能出现 `demo-*.exe`、`spike-*.exe` 或 `diag-*.exe`。
+确认 `dist\overlay-engine-0.1.4-x64\manifest.json` 的版本为 `0.1.4`，`widget` 目录中的 MSIX 为 `OverlayWidget_0.1.4.0_x64.msix`，且 `dist\overlay-engine-0.1.4-x64\app` 中只有正式组件，不能出现 `demo-*.exe`、`spike-*.exe` 或 `diag-*.exe`。
 
 ### Core + Desktop monitor
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.3-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.4-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.3-x64" `
+  -SourceDir "dist/overlay-engine-0.1.4-x64" `
   -Components Core,DesktopMonitor `
   -CreateDesktopShortcut `
   -CreateStartMenu
@@ -70,9 +70,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 内部 `-SignMode Dev` 包如果尚未信任 `OverlayWidget_Dev.cer`，安装会在证书信任步骤弹出 UAC；确认 UAC 后脚本会回到当前用户上下文继续执行 `Add-AppxPackage`。
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.3-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.4-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.3-x64" `
+  -SourceDir "dist/overlay-engine-0.1.4-x64" `
   -Components Core,GameBarWidget `
   -CreateStartMenu
 ```
@@ -88,9 +88,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1
 ### AutoStart 与完整卸载
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.3-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.4-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.3-x64" `
+  -SourceDir "dist/overlay-engine-0.1.4-x64" `
   -Components Core,DesktopMonitor,GameBarWidget `
   -AutoStart `
   -CreateDesktopShortcut `

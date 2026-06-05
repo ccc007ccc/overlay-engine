@@ -164,7 +164,7 @@ function Get-ReleaseManifest([string]$RootDir) {
 function Get-ReleaseVersion([string]$RootDir) {
     $manifest = Get-ReleaseManifest -RootDir $RootDir
     if ($manifest -and $manifest.version) { return [string]$manifest.version }
-    return '0.1.3'
+    return '0.1.4'
 }
 
 function Stop-InstalledProcess([string]$Name, [string]$RootDir) {

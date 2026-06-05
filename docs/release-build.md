@@ -27,14 +27,14 @@ Core 和 Desktop 的 `.ico` 会通过 Windows resource 嵌入 exe；Game Bar PNG
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts/build-release.ps1" `
   -Configuration Release `
   -Platform x64 `
-  -Version 0.1.3 `
+  -Version 0.1.4 `
   -SignMode Dev
 ```
 
 输出目录：
 
 ```text
-dist\overlay-engine-0.1.3-x64\
+dist\overlay-engine-0.1.4-x64\
   app\
     core-server.exe
     desktop-window-monitor.exe
@@ -63,13 +63,13 @@ dist\overlay-engine-0.1.3-x64\
 安装 Inno Setup 后运行。发布时显式传入版本和 staging 目录，避免安装器误读旧 payload：
 
 ```powershell
-iscc.exe /DAppVersion=0.1.3 /DStageDir="..\dist\overlay-engine-0.1.3-x64" "installer/overlay-engine.iss"
+iscc.exe /DAppVersion=0.1.4 /DStageDir="..\dist\overlay-engine-0.1.4-x64" "installer/overlay-engine.iss"
 ```
 
 输出：
 
 ```text
-dist\overlay-engine-0.1.3-x64-Setup.exe
+dist\overlay-engine-0.1.4-x64-Setup.exe
 ```
 
 安装器提供这些组件/任务：
@@ -88,9 +88,9 @@ dist\overlay-engine-0.1.3-x64-Setup.exe
 不生成 Inno 安装器时，可以直接运行 PowerShell 后端：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.3-x64/scripts/install.ps1" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "dist/overlay-engine-0.1.4-x64/scripts/install.ps1" `
   -Release `
-  -SourceDir "dist/overlay-engine-0.1.3-x64" `
+  -SourceDir "dist/overlay-engine-0.1.4-x64" `
   -InstallDir "$env:LOCALAPPDATA\Programs\overlay-engine" `
   -Components Core,DesktopMonitor,GameBarWidget `
   -AutoStart `
